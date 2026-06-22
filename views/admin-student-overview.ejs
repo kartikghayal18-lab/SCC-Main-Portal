@@ -147,8 +147,12 @@
             </td>
             <td><%= paper.upload_date %></td>
             <td>
-              <a href="/papers/<%= paper.id %>/view" target="_blank" rel="noopener">Open</a>
-              <a href="/papers/<%= paper.id %>/download">Download</a>
+              <% if (paper.is_downloadable_paper) { %>
+                <a href="/papers/<%= paper.id %>/view" target="_blank" rel="noopener">Open</a>
+                <a href="/papers/<%= paper.id %>/download">Download</a>
+              <% } else { %>
+                -
+              <% } %>
               <form method="post" action="/papers/<%= paper.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this paper?');">
                 <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                 <input type="hidden" name="redirectTo" value="/admin/students/<%= student.id %>/overview" />

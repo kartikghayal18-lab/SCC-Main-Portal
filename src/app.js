@@ -96,6 +96,12 @@ const TWO_FACTOR_AUTH_POST_PATHS = new Set([
   '/auth/2fa/verify',
 ]);
 const PUBLIC_WEBHOOK_POST_PATHS = new Set(['/webhook/whatsapp']);
+function getRealPaperFileCondition(alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  return `((${prefix}storage_type = 's3' AND ${prefix}public_url IS NOT NULL AND ${prefix}public_url <> '')
+    OR (${prefix}storage_type = 'local' AND ${prefix}storage_key IS NOT NULL AND ${prefix}storage_key <> ''))`;
+}
+
 function resolvePort(value) {
   const raw = String(value || '').trim();
   if (!raw) return 3000;
@@ -1042,10 +1048,19 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
             marks_obtained, max_marks, test_label, coaching_id
      FROM test_papers
      WHERE id = ? AND student_id = ?
+       AND ${getRealPaperFileCondition()}
      LIMIT 1`,
     [paperId, studentId]
   );
   if (!paper) return null;
+
+  if (paper.public_url) {
+    return {
+      fileUrl: paper.public_url,
+      fileName: paper.original_name || 'paper.pdf',
+      paper,
+    };
+  }
 
   const access = await getPaperAccess(paper, 'attachment');
   const localUrl = getRequestBaseUrl(req) && paper.stored_name
@@ -2309,10 +2324,11 @@ async function buildAnswerRequestSummaries(coachingId, branchId, requests) {
       `SELECT tp.id, tp.student_id, tp.upload_date, tp.original_name, tp.test_label, tp.content_type,
               tp.answer_request_id,
               uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
-       FROM test_papers tp
-       LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
-       WHERE tp.coaching_id = ? AND tp.branch_id = ? AND tp.answer_request_id = ANY(?::int[])
-       ORDER BY tp.upload_date DESC`,
+	       FROM test_papers tp
+	       LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
+	       WHERE tp.coaching_id = ? AND tp.branch_id = ? AND tp.answer_request_id = ANY(?::int[])
+	         AND ${getRealPaperFileCondition('tp')}
+	       ORDER BY tp.upload_date DESC`,
       [coachingId, branchId, requestIds]
     )
     : [];
@@ -2459,9 +2475,10 @@ async function savePaperUpload({
   if (answerRequestId !== null) {
     const existing = await get(
       `SELECT id, stored_name, storage_type, storage_key, public_url, content_type
-       FROM test_papers
-       WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND answer_request_id = ?
-       ORDER BY upload_date DESC, id DESC
+	       FROM test_papers
+	       WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND answer_request_id = ?
+	         AND ${getRealPaperFileCondition()}
+	       ORDER BY upload_date DESC, id DESC
        LIMIT 1`,
       [coachingId, branchId, studentId, answerRequestId]
     );
@@ -2603,7 +2620,7 @@ async function getStudentDashboardPayload(coachingId, branchId, studentId) {
 
   const papers = await all(`
 SELECT tp.id, tp.original_name, tp.stored_name, tp.upload_date,
-tp.storage_type, tp.storage_key, tp.content_type,
+	tp.storage_type, tp.storage_key, tp.public_url, tp.content_type,
 tp.marks_obtained, tp.max_marks, tp.test_label, tp.paper_type,
 tp.percentage, tp.correct_count, tp.wrong_count, tp.unattempted_count,
 tp.physics_marks, tp.chemistry_marks, tp.biology_marks, tp.botany_marks, tp.zoology_marks,
@@ -2612,10 +2629,16 @@ tp.answer_request_id, tp.uploaded_by AS uploaded_by_id,
 uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
 FROM test_papers tp
 	LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
-	WHERE tp.coaching_id = ? AND tp.branch_id = ? AND tp.student_id = ?
-	ORDER BY tp.upload_date DESC
+		WHERE tp.coaching_id = ? AND tp.branch_id = ? AND tp.student_id = ?
+		ORDER BY tp.upload_date DESC
 	LIMIT 20
-	`, [coachingId, branchId, studentId]);
+		`, [coachingId, branchId, studentId]);
+  papers.forEach((paper) => {
+    paper.is_downloadable_paper = (
+      (paper.storage_type === 's3' && Boolean(paper.public_url))
+      || (paper.storage_type === 'local' && Boolean(paper.storage_key))
+    );
+  });
 
 	  const attendance = await all(
 	    `SELECT attendance_date, status, notes
@@ -3060,7 +3083,8 @@ async function getPaperForUser(id, sessionUser) {
     `SELECT tp.*, u.roll_no, u.coaching_id AS student_coaching_id
      FROM test_papers tp
      JOIN users u ON u.id = tp.student_id
-     WHERE tp.id = ? AND tp.branch_id = ?`,
+     WHERE tp.id = ? AND tp.branch_id = ?
+       AND ${getRealPaperFileCondition('tp')}`,
     [id, sessionUser.branchId]
   );
 
@@ -3069,6 +3093,10 @@ async function getPaperForUser(id, sessionUser) {
   if (sessionUser.role === 'admin' && paper.coaching_id === sessionUser.coachingId && paper.branch_id === sessionUser.branchId) return paper;
   if (sessionUser.role === 'student' && paper.student_id === sessionUser.id && paper.coaching_id === sessionUser.coachingId && paper.branch_id === sessionUser.branchId) return paper;
   return null;
+}
+
+function getPapersRedirectPath(sessionUser) {
+  return sessionUser?.role === 'admin' ? '/admin/dashboard?section=papers' : '/student/dashboard';
 }
 
 app.use(async (req, res, next) => {
@@ -5373,9 +5401,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
        tp.original_name,
        tp.stored_name,
        tp.upload_date,
-       tp.storage_type,
-       tp.storage_key,
-       tp.size_bytes,
+	       tp.storage_type,
+	       tp.storage_key,
+	       tp.public_url,
+	       tp.size_bytes,
        tp.marks_obtained,
        tp.max_marks,
        tp.percentage,
@@ -5407,8 +5436,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      JOIN users u ON u.id = tp.student_id AND u.branch_id = tp.branch_id
      LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = tp.branch_id
      LEFT JOIN users uploader ON uploader.id = tp.uploaded_by AND uploader.branch_id = tp.branch_id
-     WHERE tp.coaching_id = ? AND tp.branch_id = ?
-       AND tp.upload_date >= ?
+	     WHERE tp.coaching_id = ? AND tp.branch_id = ?
+	       AND ${getRealPaperFileCondition('tp')}
+	       AND tp.upload_date >= ?
        AND tp.upload_date < ?
      ORDER BY tp.upload_date DESC
      LIMIT 250`,
@@ -8296,9 +8326,10 @@ app.get('/student/dashboard', requireStudent, async (req, res) => {
 
   const submissions = await all(
     `SELECT id, answer_request_id, upload_date, original_name
-     FROM test_papers
-     WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND answer_request_id IS NOT NULL
-     ORDER BY upload_date DESC`,
+	     FROM test_papers
+	     WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND answer_request_id IS NOT NULL
+	       AND ${getRealPaperFileCondition()}
+	     ORDER BY upload_date DESC`,
     [coachingId, branchId, req.session.user.id]
   );
 
@@ -8339,10 +8370,20 @@ app.get('/student/dashboard', requireStudent, async (req, res) => {
 app.get('/papers/:id/view', requireAuth, async (req, res) => {
   try {
     const paper = await getPaperForUser(req.params.id, req.session.user);
-    if (!paper) return res.status(404).send('Paper not found');
+    if (!paper) {
+      req.session.flash = { type: 'error', text: 'Paper file is not available.' };
+      return res.redirect(getPapersRedirectPath(req.session.user));
+    }
+
+    if (paper.public_url) {
+      return res.redirect(paper.public_url);
+    }
 
     const access = await getPaperAccess(paper, 'inline');
-    if (!access) return res.status(404).send('Paper access not available');
+    if (!access) {
+      req.session.flash = { type: 'error', text: 'Paper file is not available.' };
+      return res.redirect(getPapersRedirectPath(req.session.user));
+    }
 
     if (access.type === 'redirect' && access.url) {
       return res.redirect(access.url);
@@ -8352,20 +8393,32 @@ app.get('/papers/:id/view', requireAuth, async (req, res) => {
       return res.sendFile(access.filePath);
     }
 
-    return res.status(500).send('Paper access is misconfigured');
+    req.session.flash = { type: 'error', text: 'Paper file is misconfigured.' };
+    return res.redirect(getPapersRedirectPath(req.session.user));
   } catch (err) {
     console.error(err);
-    return res.status(500).send('Server error');
+    req.session.flash = { type: 'error', text: 'Unable to open paper file.' };
+    return res.redirect(getPapersRedirectPath(req.session.user));
   }
 });
 
 app.get('/papers/:id/download', requireAuth, async (req, res) => {
   try {
     const paper = await getPaperForUser(req.params.id, req.session.user);
-    if (!paper) return res.status(404).send('Paper not found');
+    if (!paper) {
+      req.session.flash = { type: 'error', text: 'Paper file is not available.' };
+      return res.redirect(getPapersRedirectPath(req.session.user));
+    }
+
+    if (paper.public_url) {
+      return res.redirect(paper.public_url);
+    }
 
     const access = await getPaperAccess(paper, 'attachment');
-    if (!access) return res.status(404).send('Paper access not available');
+    if (!access) {
+      req.session.flash = { type: 'error', text: 'Paper file is not available.' };
+      return res.redirect(getPapersRedirectPath(req.session.user));
+    }
 
     if (access.type === 'redirect' && access.url) {
       return res.redirect(access.url);
@@ -8375,10 +8428,12 @@ app.get('/papers/:id/download', requireAuth, async (req, res) => {
       return res.download(access.filePath, paper.original_name || paper.stored_name || 'paper');
     }
 
-    return res.status(500).send('Paper access is misconfigured');
+    req.session.flash = { type: 'error', text: 'Paper file is misconfigured.' };
+    return res.redirect(getPapersRedirectPath(req.session.user));
   } catch (err) {
     console.error(err);
-    return res.status(500).send('Server error');
+    req.session.flash = { type: 'error', text: 'Unable to download paper file.' };
+    return res.redirect(getPapersRedirectPath(req.session.user));
   }
 });
 app.use((err, req, res, next) => {
