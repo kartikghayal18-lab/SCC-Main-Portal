@@ -1,0 +1,341 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.brandName || coaching?.name || 'Demo Coaching' %> - Student Overview</title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body style="<%= branding?.cssVars || '' %>">
+  <div class="container wide">
+    <div class="topbar card hero-card">
+      <div class="brand-lockup">
+        <% if (branding?.logoUrl) { %>
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
+        <% } %>
+        <div>
+          <p class="eyebrow"><%= branding?.brandName || 'Admin Student View' %></p>
+          <h1><%= student?.name || 'Student Overview' %></h1>
+          <p class="muted">Roll No: <%= student?.roll_no || '-' %> | Batch: <%= student?.batch_name || ((student?.standard || student?.course) ? `${student?.standard || ''}${student?.standard && student?.course ? ' - ' : ''}${student?.course ? student.course.toUpperCase() : ''}` : '-') %></p>
+          <p class="muted">Phone: <%= student?.contact_phone || '-' %> | Email: <%= student?.email || '-' %></p>
+          <p class="muted">Student WhatsApp: <%= student?.whatsapp_number || student?.contact_phone || '-' %> | Parent WhatsApp: <%= student?.parent_whatsapp_number || student?.guardian_phone || '-' %></p>
+          <div class="hero-chip-row">
+            <span class="info-chip">Papers <strong><%= papers.length %></strong></span>
+            <span class="info-chip">Attendance <strong><%= attendanceSummary.attendancePercent %>%</strong></span>
+            <span class="info-chip">Progress <strong><%= marksSummary.marksPercent %>%</strong></span>
+            <span class="info-chip">Pending Fees <strong><%= feeSummary.pendingCount %></strong></span>
+          </div>
+        </div>
+      </div>
+      <div class="inline-actions">
+        <a href="/admin/dashboard?section=overview" class="sec-btn">Back to Overview</a>
+        <a href="/admin/dashboard?section=students" class="sec-btn">Student List</a>
+        <a href="/admin/dashboard?section=students" class="btn secondary compact">Return to Admin Page</a>
+      </div>
+    </div>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <section class="card">
+      <div class="inline-actions" style="justify-content: space-between;">
+        <div>
+          <h2>WhatsApp Onboarding</h2>
+          <% if (whatsappOnboarding?.delivered) { %>
+            <p class="status paid">WhatsApp Delivered ✅</p>
+          <% } else if (whatsappOnboarding?.failed) { %>
+            <p class="status overdue">WhatsApp Failed ❌</p>
+          <% } else { %>
+            <p class="status pending">WhatsApp Pending</p>
+          <% } %>
+          <% (whatsappOnboarding?.deliveries || []).forEach((delivery) => { %>
+            <p class="muted">
+              <%= delivery.recipient_type === 'parent' ? 'Parent' : 'Student' %>:
+              <%= delivery.whatsapp_sent ? 'Delivered' : 'Failed/Pending' %>
+              <% if (delivery.whatsapp_error) { %> - <%= delivery.whatsapp_error %><% } %>
+            </p>
+          <% }) %>
+        </div>
+        <% if (!whatsappOnboarding?.delivered) { %>
+          <form method="post" action="/admin/students/<%= student.id %>/resend-whatsapp">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+            <button type="submit" class="btn compact">Resend WhatsApp</button>
+          </form>
+        <% } %>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Edit Student Contact Details</h2>
+      <form method="post" action="/admin/students/<%= student.id %>/update" class="grid two">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+        <label>Name <input type="text" name="name" value="<%= student?.name || '' %>" /></label>
+        <label>Email <input type="email" name="email" value="<%= student?.email || '' %>" /></label>
+        <label>Contact Number <input type="text" name="contactPhone" value="<%= student?.contact_phone || '' %>" /></label>
+        <label>Student WhatsApp <input type="text" name="whatsappNumber" value="<%= student?.whatsapp_number || student?.contact_phone || '' %>" /></label>
+        <label>Guardian Phone <input type="text" name="guardianPhone" value="<%= student?.guardian_phone || '' %>" /></label>
+        <label>Parent Name <input type="text" name="parentName" value="<%= student?.parent_name || '' %>" /></label>
+        <label>Parent WhatsApp <input type="text" name="parentWhatsappNumber" value="<%= student?.parent_whatsapp_number || student?.guardian_phone || '' %>" /></label>
+        <div class="inline-actions">
+          <button type="submit" class="btn compact">Save Student Details</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="stats-grid">
+      <div class="stat-card"><p>Total Papers</p><h3><%= papers.length %></h3></div>
+      <div class="stat-card"><p>Marks Progress</p><h3><%= marksSummary.marksPercent %>%</h3></div>
+      <div class="stat-card"><p>Attendance</p><h3><%= attendanceSummary.attendancePercent %>%</h3></div>
+      <div class="stat-card"><p>Pending Fees</p><h3><%= feeSummary.pendingCount %></h3></div>
+      <div class="stat-card"><p>Pending Amount</p><h3><%= feeSummary.pendingAmount.toFixed(2) %></h3></div>
+    </section>
+
+    <section class="card">
+      <h2>Progress Chart</h2>
+      <% if (!progressSeries.length) { %>
+        <p class="muted">No marks-based papers uploaded yet for this student.</p>
+      <% } else { %>
+        <p class="muted">Total: <%= marksSummary.totalMarksObtained %>/<%= marksSummary.totalMaxMarks %> across <%= marksSummary.testsCount %> marked papers</p>
+        <canvas id="progressChart" height="260"></canvas>
+      <% } %>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>Attendance Overview</h2>
+        <table>
+          <tr><th>Total</th><th>Present</th><th>Absent</th><th>Late</th></tr>
+          <tr>
+            <td><%= attendanceSummary.total %></td>
+            <td><%= attendanceSummary.presentCount %></td>
+            <td><%= attendanceSummary.absentCount %></td>
+            <td><%= attendanceSummary.lateCount %></td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Fee Overview</h2>
+        <table>
+          <tr><th>Total Records</th><th>Pending/Overdue</th><th>Pending Amount</th></tr>
+          <tr>
+            <td><%= feeSummary.totalFees %></td>
+            <td><%= feeSummary.pendingCount %></td>
+            <td><%= feeSummary.pendingAmount.toFixed(2) %></td>
+          </tr>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Uploaded Papers</h2>
+      <table>
+        <tr><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Date</th><th>Actions</th></tr>
+        <% papers.forEach((paper) => { %>
+          <tr>
+            <td><%= paper.test_label || paper.original_name %></td>
+            <td><%= paper.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td>
+            <td><%= paper.uploaded_by_name || '-' %> (<%= paper.uploaded_by_role || '-' %>)</td>
+            <td>
+              <% if (paper.marks_obtained !== null && paper.max_marks !== null) { %>
+                <%= paper.marks_obtained %>/<%= paper.max_marks %>
+              <% } else { %>
+                -
+              <% } %>
+            </td>
+            <td><%= paper.upload_date %></td>
+            <td>
+              <a href="/papers/<%= paper.id %>/view" target="_blank" rel="noopener">Open</a>
+              <a href="/papers/<%= paper.id %>/download">Download</a>
+              <form method="post" action="/papers/<%= paper.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this paper?');">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <input type="hidden" name="redirectTo" value="/admin/students/<%= student.id %>/overview" />
+                <button type="submit" class="btn danger compact">Delete</button>
+              </form>
+            </td>
+          </tr>
+        <% }) %>
+      </table>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>Attendance History</h2>
+        <table>
+          <tr><th>Date</th><th>Status</th><th>Notes</th></tr>
+          <% attendance.forEach((entry) => { %>
+            <tr>
+              <td><%= entry.attendance_date %></td>
+              <td><span class="status <%= entry.status %>"><%= entry.status %></span></td>
+              <td><%= entry.notes || '-' %></td>
+            </tr>
+          <% }) %>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Fee History</h2>
+        <table>
+          <tr><th>Amount</th><th>Due Date</th><th>Payment Date</th><th>Status</th><th>Notes</th></tr>
+          <% fees.forEach((fee) => { %>
+            <tr>
+              <td><%= fee.amount %></td>
+              <td><%= fee.due_date || '-' %></td>
+              <td><%= fee.payment_date || '-' %></td>
+              <td><span class="status <%= fee.status %>"><%= fee.status %></span></td>
+              <td><%= fee.notes || '-' %></td>
+            </tr>
+          <% }) %>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Batch Notes Visible to This Student</h2>
+      <% if (!notes.length) { %>
+        <p class="muted">No batch notes are available for this student right now.</p>
+      <% } %>
+      <table>
+        <tr><th>Title</th><th>Link</th><th>Description</th><th>Date</th></tr>
+        <% notes.forEach((note) => { %>
+          <tr>
+            <td><%= note.title %></td>
+            <td><a href="<%= note.resource_url %>" target="_blank" rel="noopener">Open Resource</a></td>
+            <td><%= note.description || '-' %></td>
+            <td><%= note.created_at %></td>
+          </tr>
+        <% }) %>
+      </table>
+    </section>
+  </div>
+
+  <script>
+    const progressData = <%- JSON.stringify(progressSeries || []) %>;
+    const canvas = document.getElementById('progressChart');
+
+    if (canvas && progressData.length) {
+      const styles = getComputedStyle(document.body);
+      const brandColor = styles.getPropertyValue('--brand').trim() || '#1769aa';
+      const lineColor = styles.getPropertyValue('--line').trim() || '#d6e0eb';
+      const textColor = styles.getPropertyValue('--muted').trim() || '#556070';
+      const surfaceColor = styles.getPropertyValue('--card').trim() || '#ffffff';
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth;
+      const height = 300;
+      canvas.style.height = `${height}px`;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const pad = { left: 44, right: 22, top: 24, bottom: 42 };
+      const chartW = width - pad.left - pad.right;
+      const chartH = height - pad.top - pad.bottom;
+      const maxY = 100;
+      const points = progressData.map((d, idx) => {
+        const x = pad.left + (chartW * idx) / Math.max(progressData.length - 1, 1);
+        const y = pad.top + chartH - (d.percent / maxY) * chartH;
+        return { x, y, d };
+      });
+      const labelStep = Math.max(1, Math.ceil(points.length / 6));
+      const valueStep = Math.max(1, Math.ceil(points.length / 8));
+
+      const drawChart = (progress = 1) => {
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = surfaceColor;
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 5; i += 1) {
+          const y = pad.top + (chartH / 5) * i;
+          ctx.beginPath();
+          ctx.moveTo(pad.left, y);
+          ctx.lineTo(width - pad.right, y);
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = textColor;
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'left';
+        for (let i = 0; i <= 5; i += 1) {
+          const val = maxY - (maxY / 5) * i;
+          const y = pad.top + (chartH / 5) * i + 4;
+          ctx.fillText(`${val}%`, 6, y);
+        }
+
+        const animatedPoints = points.map((p) => ({
+          ...p,
+          y: pad.top + chartH - ((pad.top + chartH - p.y) * progress),
+        }));
+
+        if (animatedPoints.length > 1) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(animatedPoints[0].x, height - pad.bottom);
+          animatedPoints.forEach((p) => ctx.lineTo(p.x, p.y));
+          ctx.lineTo(animatedPoints[animatedPoints.length - 1].x, height - pad.bottom);
+          ctx.closePath();
+          ctx.globalAlpha = 0.12;
+          ctx.fillStyle = brandColor;
+          ctx.fill();
+          ctx.restore();
+        }
+
+        ctx.strokeStyle = brandColor;
+        ctx.lineWidth = 3;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        animatedPoints.forEach((p, idx) => {
+          if (idx === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+
+        animatedPoints.forEach((p, idx) => {
+          ctx.fillStyle = brandColor;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = surfaceColor;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          if (progress < 0.95) return;
+
+          ctx.fillStyle = textColor;
+          const showValue = idx === points.length - 1 || idx === 0 || idx % valueStep === 0;
+          if (showValue) {
+            ctx.textAlign = 'center';
+            ctx.fillText(`${p.d.percent}%`, p.x, p.y - 12);
+          }
+
+          const showLabel = idx === 0 || idx === points.length - 1 || idx % labelStep === 0;
+          if (showLabel) {
+            const rawLabel = progressData[idx].label || `Test ${idx + 1}`;
+            const label = rawLabel.length > 12 ? `T${idx + 1}` : rawLabel;
+            ctx.textAlign = 'center';
+            ctx.fillText(label, p.x, height - 10);
+          }
+        });
+      };
+
+      let start = null;
+      const animate = (timestamp) => {
+        if (!start) start = timestamp;
+        const elapsed = timestamp - start;
+        const progress = Math.min(elapsed / 680, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        drawChart(eased);
+        if (progress < 1) requestAnimationFrame(animate);
+      };
+
+      requestAnimationFrame(animate);
+    }
+  </script>
+</body>
+</html>

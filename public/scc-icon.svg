@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" role="img" aria-labelledby="title">
+  <title id="title">SCC target logo</title>
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#fde600"/>
+    </linearGradient>
+  </defs>
+  <rect width="320" height="320" rx="64" fill="#35438f"/>
+  <g transform="translate(28 28)" fill="none" stroke="url(#gold)" stroke-width="18">
+    <circle cx="120" cy="120" r="110"/>
+    <circle cx="120" cy="120" r="76"/>
+    <circle cx="120" cy="120" r="42"/>
+  </g>
+  <g fill="url(#gold)">
+    <path d="m145 151 98-98 18 18-98 98z"/>
+    <path d="m239 54 13-40 22 19 33-9-9 33 19 22-40 13z"/>
+    <circle cx="148" cy="154" r="15"/>
+  </g>
+</svg>

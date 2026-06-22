@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/overlay_panel_bg"
+    android:elevation="6dp"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/dragHandle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:paddingBottom="8dp"
+        android:text="@string/drag_handle"
+        android:textStyle="bold" />
+
+    <View
+        android:id="@+id/tapTarget"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_gravity="center_horizontal"
+        android:background="@drawable/target_circle" />
+
+    <TextView
+        android:id="@+id/textStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="Idle"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/buttonToggle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/overlay_button_bg"
+        android:gravity="center"
+        android:padding="10dp"
+        android:text="@string/start_clicking" />
+
+    <TextView
+        android:id="@+id/buttonClose"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/overlay_button_bg"
+        android:gravity="center"
+        android:padding="10dp"
+        android:text="@string/close_overlay" />
+
+</LinearLayout>

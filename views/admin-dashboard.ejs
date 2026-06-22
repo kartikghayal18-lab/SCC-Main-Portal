@@ -1,0 +1,1376 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.brandName || coaching?.name || 'Demo Coaching' %> · Admin</title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body class="dashboard-shell ops-dashboard-v2" style="<%= branding?.cssVars || '' %>">
+  <%
+    const sectionMetaMap = {
+      overview: {
+        label: 'Control Center',
+        title: 'Run your institute from one operating layer',
+        copy: 'Attendance, fees, uploads, and academic operations stay in one compact admin system.',
+        actionHref: '/admin/dashboard?section=students',
+        actionLabel: 'Open Students'
+      },
+      students: {
+        label: 'Student Ops',
+        title: 'Admissions, batches, and retention',
+        copy: 'Keep student operations tight, searchable, and batch-aware without drowning the screen in forms.',
+        actionHref: '#student-create-panel',
+        actionLabel: 'Add Student'
+      },
+      attendance: {
+        label: 'Attendance Desk',
+        title: 'Mark, audit, and detect risk quickly',
+        copy: 'Save attendance in seconds and review monthly movement without switching tools.',
+        actionHref: '#attendance-form-panel',
+        actionLabel: 'Mark Attendance'
+      },
+      fees: {
+        label: 'Finance Desk',
+        title: 'Collections, dues, and follow-up',
+        copy: 'Track who paid, what is pending, and where recovery work is needed this month.',
+        actionHref: '#fees-form-panel',
+        actionLabel: 'Add Fee'
+      },
+      papers: {
+        label: 'Academic Records',
+        title: 'Uploads, papers, and answer windows',
+        copy: 'Manage paper uploads, answer windows, and storage diagnostics from one academic operations space.',
+        actionHref: '#paper-upload-panel',
+        actionLabel: 'Upload Paper'
+      },
+      omr: {
+        label: 'OMR Results',
+        title: 'Import OMR marks and link scanned sheets',
+        copy: 'Preview OScan CSV results, commit matched rows, and attach OMR sheets to student records.',
+        actionHref: '#omr-import-panel',
+        actionLabel: 'Import OMR'
+      },
+      notes: {
+        label: 'Learning Hub',
+        title: 'Notes, links, and announcements',
+        copy: 'Publish batch resources and keep latest learning material visible without extra clutter.',
+        actionHref: '#notes-publish-panel',
+        actionLabel: 'Publish Note'
+      },
+      whatsapp: {
+        label: 'WhatsApp Center',
+        title: 'Parent communication and automated alerts',
+        copy: 'Configure WhatsApp Cloud API, send broadcasts, and track parent message delivery from one place.',
+        actionHref: '#whatsapp-broadcast-panel',
+        actionLabel: 'Send Announcement'
+      },
+      settings: {
+        label: 'Settings',
+        title: 'Branding, profile, and access control',
+        copy: 'Update workspace identity and admin security from a cleaner control space.',
+        actionHref: '#settings-profile-panel',
+        actionLabel: 'Open Settings'
+      }
+    };
+
+    const currentSectionMeta = sectionMetaMap[activeSection] || sectionMetaMap.overview;
+    const todayLabel = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+    const feesPaidThisMonthAmount = (feesPaidThisMonth || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const attendanceReportHref = `/admin/reports/attendance.pdf?attendanceMonth=${encodeURIComponent(attendanceMonthFilter || '')}&attendanceDate=${encodeURIComponent(attendanceDateFilter || '')}`;
+    const feesReportHref = `/admin/reports/fees.pdf?feesMonth=${encodeURIComponent(feesMonthFilter || '')}&feesDate=${encodeURIComponent(feesDateFilter || '')}`;
+    const formatDashboardDate = (value) => {
+      const raw = String(value || '').slice(0, 10);
+      const parsed = new Date(`${raw}T00:00:00`);
+      if (Number.isNaN(parsed.getTime())) return value || '-';
+      return parsed.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+    };
+    const activeBatchesCount = (batches || []).filter((batch) => batch.status !== 'completed').length;
+    const completedBatchesCount = (batches || []).filter((batch) => batch.status === 'completed').length;
+    const activeUploadWindows = (answerRequestSummaries || []).filter((item) => item.state.isActive).length;
+    const upcomingUploadWindows = (answerRequestSummaries || []).filter((item) => item.state.isUpcoming).length;
+    const topPerformers = [...(overviewStudents || [])]
+      .filter((student) => student.latestPercent !== null)
+      .sort((a, b) => Number(b.latestPercent) - Number(a.latestPercent))
+      .slice(0, 5);
+
+    const attendanceByRoll = {};
+    (attendance || []).forEach((entry) => {
+      const key = entry.roll_no || entry.name;
+      if (!attendanceByRoll[key]) {
+        attendanceByRoll[key] = { name: entry.name, roll: entry.roll_no, absent: 0, late: 0, present: 0 };
+      }
+      if (entry.status === 'absent') attendanceByRoll[key].absent += 1;
+      if (entry.status === 'late') attendanceByRoll[key].late += 1;
+      if (entry.status === 'present') attendanceByRoll[key].present += 1;
+    });
+    const lowAttendanceAlerts = Object.values(attendanceByRoll)
+      .filter((item) => item.absent > 0 || item.late > 1)
+      .sort((a, b) => (b.absent + b.late) - (a.absent + a.late))
+      .slice(0, 6);
+
+    const recentActivities = [
+      ...(papers || []).slice(0, 4).map((paper) => ({
+        type: 'paper',
+        title: `${paper.name || paper.roll_no} uploaded ${paper.test_label || paper.original_name}`,
+        meta: paper.batch_name || '-',
+        timestamp: paper.upload_date,
+      })),
+      ...(fees || []).filter((fee) => fee.status === 'paid').slice(0, 4).map((fee) => ({
+        type: 'fee',
+        title: `Fee received from ${fee.name}`,
+        meta: `₹${fee.amount}`,
+        timestamp: fee.payment_date || fee.due_date || '',
+      })),
+      ...(attendance || []).slice(0, 4).map((item) => ({
+        type: 'attendance',
+        title: `Attendance marked for ${item.name}`,
+        meta: item.status,
+        timestamp: item.attendance_date,
+      })),
+      ...(notes || []).slice(0, 3).map((note) => ({
+        type: 'note',
+        title: `Note published: ${note.title}`,
+        meta: note.batch_name || '-',
+        timestamp: note.created_at,
+      }))
+    ].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0)).slice(0, 8);
+
+    const actionItems = [
+      { label: 'Add Student', href: '/admin/dashboard?section=students#student-create-panel' },
+      { label: 'Mark Attendance', href: '/admin/dashboard?section=attendance#attendance-form-panel' },
+      { label: 'Collect Fees', href: '/admin/dashboard?section=fees#fees-form-panel' },
+      { label: 'Upload Paper', href: '/admin/dashboard?section=papers#paper-upload-panel' },
+      { label: 'WhatsApp', href: '/admin/dashboard?section=whatsapp#whatsapp-broadcast-panel' }
+    ];
+
+    const metricCards = [
+      { label: 'Total Students', value: stats.totalStudents, change: `${studentUsage.limit === null ? 'Unlimited plan' : `${studentUsage.remaining} seats left`}`, tone: 'primary' },
+      { label: 'Attendance Entries', value: attendanceThisMonthCount || 0, change: attendanceMonthFilter || 'This month', tone: 'success' },
+      { label: 'Collected Fees', value: `₹${feesPaidThisMonthAmount.toFixed(0)}`, change: `${feesPaidThisMonth.length} paid entries`, tone: 'success' },
+      { label: 'Pending Fees', value: stats.pendingFees, change: 'Requires action', tone: 'warning' },
+      { label: 'Upload Activity', value: papersThisMonthCount || 0, change: `${activeUploadWindows} active windows`, tone: 'primary' },
+      { label: 'Active Batches', value: activeBatchesCount, change: `${completedBatchesCount} completed`, tone: 'neutral' }
+    ];
+  %>
+
+  <div class="ops2-shell">
+    <aside class="ops2-sidebar">
+      <div class="ops2-sidebar__brand">
+        <% if (branding?.logoUrl) { %>
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName || coaching?.name || 'Demo Coaching' %> logo" class="ops2-sidebar__logo" />
+        <% } %>
+        <div>
+          <p class="ops2-eyebrow">Workspace</p>
+          <h2><%= coaching?.name || branding?.brandName || 'Demo Coaching' %></h2>
+          <p class="tiny-note"><%= branch?.name || user?.branchName || 'Branch' %></p>
+        </div>
+      </div>
+
+      <nav class="ops2-nav" aria-label="Admin Navigation">
+        <a class="ops2-nav__item <%= activeSection === 'overview' ? 'is-active' : '' %>" href="/admin/dashboard?section=overview"><span>●</span><span>Dashboard</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'students' ? 'is-active' : '' %>" href="/admin/dashboard?section=students"><span>◐</span><span>Students</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'attendance' ? 'is-active' : '' %>" href="/admin/dashboard?section=attendance"><span>◌</span><span>Attendance</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'fees' ? 'is-active' : '' %>" href="/admin/dashboard?section=fees"><span>◈</span><span>Fees</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'papers' ? 'is-active' : '' %>" href="/admin/dashboard?section=papers"><span>◆</span><span>Test Papers</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'notes' ? 'is-active' : '' %>" href="/admin/dashboard?section=notes"><span>◫</span><span>Notes</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'whatsapp' ? 'is-active' : '' %>" href="/admin/dashboard?section=whatsapp"><span>◍</span><span>WhatsApp</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'notifications' ? 'is-active' : '' %>" href="/admin/dashboard?section=notifications"><span>◔</span><span>Notifications</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'settings' ? 'is-active' : '' %>" href="/admin/dashboard?section=settings"><span>⎈</span><span>Settings</span></a>
+      </nav>
+
+      <div class="ops2-sidebar__footer">
+        <div class="ops2-user">
+          <span class="ops2-user__avatar"><%= (user.name || 'A').trim().charAt(0).toUpperCase() %></span>
+          <div>
+            <strong><%= user.name %></strong>
+            <span><%= coaching?.plan_name || user.coachingPlan || 'Plan' %></span>
+          </div>
+        </div>
+        <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <button type="submit" class="ops2-logout">Logout</button>
+        </form>
+      </div>
+    </aside>
+
+    <div class="ops2-stage">
+      <header class="ops2-topbar">
+        <form method="get" action="/admin/search-student" class="ops2-searchbar">
+          <span class="ops2-searchbar__icon">⌕</span>
+          <input type="text" name="roll" value="<%= studentSearch?.query || '' %>" placeholder="Search students, rolls, notes, batches" />
+        </form>
+        <div class="ops2-topbar__actions">
+          <button type="button" class="ops2-ghost-btn">Ctrl + K</button>
+          <a href="<%= currentSectionMeta.actionHref %>" class="ops2-primary-btn"><%= currentSectionMeta.actionLabel %></a>
+          <div class="ops2-topbar__user">
+            <span class="ops2-topbar__dot"></span>
+            <span class="ops2-topbar__meta"><strong><%= user.name %></strong><small><%= branch?.name || user?.branchName || 'Branch' %> · <%= todayLabel %></small></span>
+          </div>
+        </div>
+      </header>
+
+      <% if (flash) { %>
+        <div class="alert <%= flash.type %>"><%= flash.text %></div>
+        <% if (activeSection === 'papers' && flash.details?.length) { %>
+          <section class="ops2-panel ops2-panel--logs">
+            <div class="ops2-panel__header compact">
+              <div>
+                <p class="ops2-eyebrow">Upload Debug</p>
+                <h3>Upload Details</h3>
+              </div>
+            </div>
+            <div class="ops2-log-list">
+              <% flash.details.forEach((item) => { %>
+                <div class="ops2-log-item">
+                  <strong><%= item.file %></strong>
+                  <span><%= item.reason %></span>
+                </div>
+              <% }) %>
+            </div>
+          </section>
+        <% } %>
+      <% } %>
+
+      <% if (subscriptionState.accessBlocked) { %>
+        <section class="ops2-panel blocked-card">
+          <div class="ops2-panel__header compact">
+            <div>
+              <p class="ops2-eyebrow">Subscription Blocked</p>
+              <h3><%= subscriptionState.blockedTitle %></h3>
+            </div>
+          </div>
+          <p class="muted"><%= subscriptionState.blockedMessage %></p>
+        </section>
+      <% } else { %>
+        <% if (subscriptionNotice) { %>
+          <div class="alert warning"><%= subscriptionNotice %></div>
+        <% } %>
+
+        <main class="ops2-main">
+          <section class="ops2-hero">
+            <div class="ops2-hero__copy">
+              <p class="ops2-eyebrow"><%= currentSectionMeta.label %></p>
+              <h1><%= currentSectionMeta.title %></h1>
+              <p><%= currentSectionMeta.copy %></p>
+              <div class="ops2-action-row">
+                <% actionItems.forEach((item) => { %>
+                  <a href="<%= item.href %>" class="ops2-chip-link"><%= item.label %></a>
+                <% }) %>
+              </div>
+            </div>
+            <div class="ops2-hero__meta">
+              <div class="ops2-insight-card">
+                <span class="ops2-insight-card__label">Today</span>
+                <strong><%= todayLabel %></strong>
+                <small><%= stats.absentEntries %> absent entries recorded</small>
+              </div>
+              <div class="ops2-insight-card ops2-insight-card--accent">
+                <span class="ops2-insight-card__label">Ops Pulse</span>
+                <strong><%= activeBatchesCount %> live batches</strong>
+                <small><%= activeUploadWindows %> upload windows running</small>
+              </div>
+            </div>
+          </section>
+
+          <% if (activeSection === 'overview') { %>
+            <section class="ops2-metrics-grid">
+              <% metricCards.forEach((metric, index) => { %>
+                <article class="ops2-metric-card ops2-metric-card--<%= metric.tone %>" style="animation-delay:<%= index * 0.05 %>s">
+                  <div class="ops2-metric-card__top">
+                    <span class="ops2-metric-card__icon"><%= ['◔','◑','◒','◕','◈','◎'][index] %></span>
+                    <span class="ops2-metric-card__trend">+<%= index + 3 %>%</span>
+                  </div>
+                  <strong><%= metric.value %></strong>
+                  <span class="ops2-metric-card__label"><%= metric.label %></span>
+                  <small><%= metric.change %></small>
+                  <div class="ops2-sparkbars">
+                    <% [35, 62, 48, 72, 58].forEach((height, sparkIndex) => { %>
+                      <span style="height:<%= height + (index * 2) - sparkIndex %>%"></span>
+                    <% }) %>
+                  </div>
+                </article>
+              <% }) %>
+            </section>
+
+            <section class="ops2-split-grid">
+              <section class="ops2-panel ops2-panel--chartwide">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Insights</p>
+                    <h3>Attendance & collection trends</h3>
+                  </div>
+                  <span class="ops2-kicker">This month</span>
+                </div>
+                <div class="ops2-chart-stack">
+                  <div class="ops2-line-chart">
+                    <svg viewBox="0 0 600 180" preserveAspectRatio="none" aria-hidden="true">
+                      <defs>
+                        <linearGradient id="opsLineA" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stop-color="rgba(37,99,235,0.35)" />
+                          <stop offset="100%" stop-color="rgba(37,99,235,0)" />
+                        </linearGradient>
+                      </defs>
+                      <path d="M0 150 C70 120, 100 60, 160 78 S260 155, 330 118 430 28, 600 82" fill="none" stroke="#2563eb" stroke-width="4" stroke-linecap="round" />
+                      <path d="M0 180 L0 150 C70 120, 100 60, 160 78 S260 155, 330 118 430 28, 600 82 L600 180 Z" fill="url(#opsLineA)" />
+                    </svg>
+                  </div>
+                  <div class="ops2-bars-grid">
+                    <div><span style="height: 66%"></span><small>Mon</small></div>
+                    <div><span style="height: 74%"></span><small>Tue</small></div>
+                    <div><span style="height: 48%"></span><small>Wed</small></div>
+                    <div><span style="height: 81%"></span><small>Thu</small></div>
+                    <div><span style="height: 70%"></span><small>Fri</small></div>
+                    <div><span style="height: 55%"></span><small>Sat</small></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Signals</p>
+                    <h3>Upcoming reminders</h3>
+                  </div>
+                </div>
+                <div class="ops2-timeline-list">
+                  <% if (!answerRequestSummaries.length && !lowAttendanceAlerts.length && !stats.pendingFees) { %>
+                    <p class="muted">No alerts right now. Operations look stable.</p>
+                  <% } %>
+                  <% answerRequestSummaries.slice(0, 3).forEach((request) => { %>
+                    <article class="ops2-timeline-item">
+                      <strong><%= request.title %></strong>
+                      <span><%= request.batch_name || '-' %> · <%= request.state.phase %></span>
+                    </article>
+                  <% }) %>
+                  <% lowAttendanceAlerts.slice(0, 3).forEach((alert) => { %>
+                    <article class="ops2-timeline-item danger">
+                      <strong><%= alert.name %></strong>
+                      <span><%= alert.absent %> absent · <%= alert.late %> late</span>
+                    </article>
+                  <% }) %>
+                  <% if (stats.pendingFees) { %>
+                    <article class="ops2-timeline-item warn">
+                      <strong>Pending fee records</strong>
+                      <span><%= stats.pendingFees %> entries need follow-up</span>
+                    </article>
+                  <% } %>
+                </div>
+              </section>
+            </section>
+
+            <section class="ops2-dual-grid">
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Activity</p>
+                    <h3>Recent activity feed</h3>
+                  </div>
+                </div>
+                <div class="ops2-activity-list">
+                  <% if (!recentActivities.length) { %>
+                    <p class="muted">No activity yet.</p>
+                  <% } %>
+                  <% recentActivities.forEach((item) => { %>
+                    <article class="ops2-activity-row ops2-activity-row--<%= item.type %>">
+                      <span class="ops2-activity-avatar"><%= (item.title || 'A').trim().charAt(0).toUpperCase() %></span>
+                      <div>
+                        <strong><%= item.title %></strong>
+                        <span><%= item.meta %> · <%= item.timestamp || '-' %></span>
+                      </div>
+                    </article>
+                  <% }) %>
+                </div>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Rankings</p>
+                    <h3>Top performers</h3>
+                  </div>
+                </div>
+                <div class="ops2-ranking-list">
+                  <% if (!topPerformers.length) { %>
+                    <p class="muted">No marked papers yet.</p>
+                  <% } %>
+                  <% topPerformers.forEach((student, index) => { %>
+                    <article class="ops2-ranking-row">
+                      <span class="ops2-ranking-rank">#<%= index + 1 %></span>
+                      <div>
+                        <strong><%= student.name %></strong>
+                        <span><%= student.batch_name || '-' %></span>
+                      </div>
+                      <span class="ops2-ranking-score"><%= student.latestPercent %>%</span>
+                    </article>
+                  <% }) %>
+                </div>
+              </section>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">Student Snapshot</p>
+                  <h3>High signal student overview</h3>
+                </div>
+                <a href="/admin/dashboard?section=students" class="ops2-inline-link">Open student workspace</a>
+              </div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead>
+                    <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Phone</th><th>Papers</th><th>Latest Score</th><th>Last Upload</th><th>Open</th></tr>
+                  </thead>
+                  <tbody>
+                    <% overviewStudents.forEach((student) => { %>
+                      <tr>
+                        <td><%= student.roll_no %></td>
+                        <td><%= student.name %></td>
+                        <td><%= student.batch_name || '-' %></td>
+                        <td><%= student.contact_phone || '-' %></td>
+                        <td><%= student.paperCount %></td>
+                        <td><%= student.latestPercent !== null ? `${student.latestPercent}%` : '-' %></td>
+                        <td><%= student.lastUpload || '-' %></td>
+                        <td><a href="/admin/students/<%= student.id %>/overview" class="ops2-inline-link">View</a></td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="ops2-dual-grid">
+              <section class="ops2-panel" id="answer-request-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Upload Windows</p>
+                    <h3>Create 24-hour answer windows</h3>
+                  </div>
+                </div>
+                <form method="post" action="/admin/answer-requests" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Title</label><input type="text" name="title" placeholder="Physics Test 5 Answer Upload" required /></div>
+                  <div class="ops2-field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                  <div class="ops2-field"><label>Start Time</label><input type="datetime-local" name="startsAt" value="<%= defaultAnswerRequestStart %>" required /></div>
+                  <div class="ops2-field full"><label>Description</label><textarea name="description" rows="3" placeholder="Upload today's handwritten answer paper."></textarea></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn" <%= batches.length ? '' : 'disabled' %>>Create Window</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Trackers</p>
+                    <h3>Active upload windows</h3>
+                  </div>
+                </div>
+                <div class="ops2-window-list">
+                  <% if (!answerRequestSummaries.length) { %>
+                    <p class="muted">No upload windows created yet.</p>
+                  <% } %>
+                  <% answerRequestSummaries.forEach((request) => { %>
+                    <article class="ops2-window-card">
+                      <div class="ops2-window-card__top">
+                        <div>
+                          <strong><%= request.title %></strong>
+                          <span><%= request.batch_name || '-' %></span>
+                        </div>
+                        <span class="status <%= request.state.isActive ? 'paid' : request.state.isUpcoming ? 'pending' : 'overdue' %>"><%= request.state.phase %></span>
+                      </div>
+                      <div class="ops2-window-metrics">
+                        <span>Total <strong><%= request.totalStudents %></strong></span>
+                        <span>Uploaded <strong><%= request.uploadedCount %></strong></span>
+                        <span>Pending <strong><%= request.pendingCount %></strong></span>
+                      </div>
+                      <small>Start <%= request.state.startsAtLabel %> · End <%= request.state.endsAtLabel %></small>
+                      <% if (request.state.isExpired) { %>
+                        <form method="post" action="/admin/answer-requests/<%= request.id %>/delete" onsubmit="return confirm('Remove this expired upload session? Uploaded papers will stay saved, only this session card will be removed.');">
+                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                          <button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Remove Session</button>
+                        </form>
+                      <% } %>
+                    </article>
+                  <% }) %>
+                </div>
+              </section>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'students') { %>
+            <section class="ops2-students-shell">
+              <div class="ops2-students-main">
+                <section class="ops2-panel">
+                  <div class="ops2-panel__header">
+                    <div>
+                      <p class="ops2-eyebrow">Registry</p>
+                      <h3>Students by batch</h3>
+                    </div>
+                    <span class="ops2-kicker"><%= students.length %> students</span>
+                  </div>
+                  <% if (studentSearch?.query) { %>
+                    <div class="ops2-search-inline-result">
+                      <strong><%= studentSearch.results.length %></strong> result(s) for “<%= studentSearch.query %>”
+                      <a href="/admin/dashboard?section=students" class="ops2-inline-link">Clear</a>
+                    </div>
+                  <% } %>
+                  <div class="ops2-batch-list">
+                    <% studentBatchGroups.forEach((group, groupIndex) => { %>
+                      <details class="ops2-batch-item" <%= groupIndex === 0 ? 'open' : '' %>>
+                        <summary class="ops2-batch-item__summary">
+                          <div>
+                            <strong><%= group.label %></strong>
+                            <span><%= group.students.length %> students</span>
+                          </div>
+                          <span class="ops2-batch-item__chevron">⌄</span>
+                        </summary>
+                        <div class="ops2-table-shell ops2-table-shell--compact">
+                          <table class="ops2-table ops2-table--students">
+                            <thead>
+                              <tr><th>Roll</th><th>Name</th><th>Class</th><th>Student WhatsApp</th><th>Parent WhatsApp</th><th>Actions</th></tr>
+                            </thead>
+                            <tbody>
+                              <% group.students.forEach((s) => { %>
+                                <tr>
+                                  <td><%= s.roll_no %></td>
+                                  <td><%= s.name %></td>
+                                  <td><%= group.label %></td>
+                                  <td><%= s.whatsapp_number || s.contact_phone || '-' %></td>
+                                  <td><%= s.parent_whatsapp_number || s.guardian_phone || '-' %></td>
+                                  <td class="ops2-actions-inline">
+                                    <a href="/admin/students/<%= s.id %>/overview" class="ops2-inline-link">View Dashboard</a>
+                                    <form class="inline-delete-form" method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                                      <button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button>
+                                    </form>
+                                  </td>
+                                </tr>
+                              <% }) %>
+                            </tbody>
+                          </table>
+                        </div>
+                      </details>
+                    <% }) %>
+                  </div>
+                </section>
+
+                <section class="ops2-dual-grid ops2-dual-grid--tight">
+                  <section class="ops2-panel">
+                    <div class="ops2-panel__header compact">
+                      <div>
+                        <p class="ops2-eyebrow">Batch Manager</p>
+                        <h3>Promote and rename batches</h3>
+                      </div>
+                    </div>
+                    <form method="post" action="/admin/batches/rename" class="ops2-form-grid">
+                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                      <div class="ops2-field"><label>Current Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                      <div class="ops2-field"><label>New Batch Name</label><input type="text" name="newBatchName" placeholder="12th-A, Repeater, CET" required /></div>
+                      <div class="ops2-actions"><button type="submit" class="ops2-primary-btn">Update Batch</button></div>
+                    </form>
+                  </section>
+
+                  <section class="ops2-panel">
+                    <div class="ops2-panel__header compact">
+                      <div>
+                        <p class="ops2-eyebrow">Completed Batches</p>
+                        <h3>Retention controls</h3>
+                      </div>
+                    </div>
+                    <div class="ops2-batch-status-list">
+                      <% batchSummaries.forEach((batch) => { %>
+                        <article class="ops2-batch-status-row">
+                          <div>
+                            <strong><%= batch.name %></strong>
+                            <span><%= batch.status || (batch.isUnassigned ? '-' : 'active') %> · <%= batch.count %> students</span>
+                          </div>
+                          <div class="ops2-batch-status-actions">
+                            <% if (batch.id && !batch.is_retention_batch) { %>
+                              <% if (batch.status === 'completed') { %>
+                                <form method="post" action="/admin/batches/<%= batch.id %>/activate"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-inline-link-btn">Make Active</button></form>
+                              <% } else { %>
+                                <form method="post" action="/admin/batches/<%= batch.id %>/complete"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-inline-link-btn">Mark Complete</button></form>
+                              <% } %>
+                              <form class="inline-delete-form" method="post" action="/admin/batches/<%= batch.id %>/delete" onsubmit="return confirm('Delete batch <%= batch.name %>? Students must be removed from this batch first. Related notes and answer windows for this batch will also be removed.');">
+                                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                                <button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button>
+                              </form>
+                            <% } else if (batch.is_retention_batch) { %>
+                              <span class="muted">Protected</span>
+                            <% } else { %>
+                              <span class="muted">-</span>
+                            <% } %>
+                          </div>
+                        </article>
+                      <% }) %>
+                    </div>
+                  </section>
+                </section>
+              </div>
+
+              <aside class="ops2-students-side">
+                <section class="ops2-panel" id="student-create-panel">
+                  <div class="ops2-panel__header compact">
+                    <div>
+                      <p class="ops2-eyebrow">Admission</p>
+                      <h3>Add student</h3>
+                    </div>
+                    <span class="ops2-kicker"><%= studentUsage.limit === null ? 'Unlimited' : `${studentUsage.remaining} left` %></span>
+                  </div>
+                  <form method="post" action="/admin/students" class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
+                    <div class="ops2-field"><label>Name</label><input type="text" name="name" /></div>
+                    <div class="ops2-field"><label>Contact Number</label><input type="text" name="contactPhone" placeholder="9876543210" /></div>
+                    <div class="ops2-field"><label>Student WhatsApp</label><input type="text" name="whatsappNumber" placeholder="919876543210" /></div>
+                    <div class="ops2-field"><label>Guardian Phone</label><input type="text" name="guardianPhone" placeholder="9876543210" /></div>
+                    <div class="ops2-field"><label>Parent Name</label><input type="text" name="parentName" /></div>
+                    <div class="ops2-field"><label>Parent WhatsApp</label><input type="text" name="parentWhatsappNumber" placeholder="919876543210" /></div>
+                    <div class="ops2-field"><label>Email ID</label><input type="email" name="email" placeholder="student@example.com" /></div>
+                    <div class="ops2-field"><label>Total Fees</label><input type="number" name="totalFee" min="0" step="0.01" placeholder="50000" /></div>
+                    <div class="ops2-field full"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                    <div class="ops2-field full"><label>Password (optional)</label><input type="text" name="password" placeholder="Default = roll number" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn" <%= batches.length ? '' : 'disabled' %>>Create Student</button></div>
+                  </form>
+                </section>
+
+                <section class="ops2-panel">
+                  <div class="ops2-panel__header compact">
+                    <div>
+                      <p class="ops2-eyebrow">Tools</p>
+                      <h3>Search & batch create</h3>
+                    </div>
+                  </div>
+                  <form method="get" action="/admin/search-student" class="ops2-form-grid">
+                    <div class="ops2-field full"><label>Search Student</label><input type="text" name="roll" value="<%= studentSearch?.query || '' %>" placeholder="Roll / name / phone" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Search</button></div>
+                  </form>
+                  <div class="ops2-divider"></div>
+                  <form method="post" action="/admin/batches" data-single-submit class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field full"><label>Custom Batch Name</label><input type="text" name="batchName" placeholder="11th-A, Repeater, JEE 2027" required /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Create Batch</button></div>
+                  </form>
+                  <div class="ops2-divider"></div>
+                  <form method="post" action="/admin/students/import" data-single-submit class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field full"><label>Import Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                    <div class="ops2-field full">
+                      <label>Student CSV</label>
+                      <textarea name="studentsCsv" rows="5" placeholder="roll,name,student_whatsapp,parent_whatsapp,email"></textarea>
+                    </div>
+                    <p class="tiny-note">One student per line. Header row is optional.</p>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn" <%= batches.length ? '' : 'disabled' %>>Import Students</button></div>
+                  </form>
+                </section>
+              </aside>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'attendance') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="attendance-form-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Attendance</p>
+                    <h3>Mark attendance</h3>
+                  </div>
+                </div>
+                <div class="ops2-tab-switch" role="tablist">
+                  <button type="button" class="ops2-tab-btn active" data-tab="single">Single Student</button>
+                  <button type="button" class="ops2-tab-btn" data-tab="bulk">Bulk by Batch</button>
+                </div>
+                <div id="tab-single" class="ops2-tab-panel active">
+                  <form method="post" action="/admin/attendance" class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field full">
+                      <label>Student Name / Roll Number</label>
+                      <input type="text" name="studentLookup" list="attendance-student-options" data-student-picker="attendance" placeholder="Type N to find Nilesh" autocomplete="off" required />
+                      <input type="hidden" name="rollNo" data-student-roll-target="attendance" required />
+                      <p class="tiny-note">Start typing student name, then choose the student. Roll number is filled automatically.</p>
+                      <datalist id="attendance-student-options">
+                        <% students.forEach((student) => { %>
+                          <option value="<%= student.name || 'Student' %> - Roll <%= student.roll_no %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                          <option value="<%= student.roll_no %> - <%= student.name || 'Student' %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                        <% }) %>
+                      </datalist>
+                    </div>
+                    <div class="ops2-field"><label>Date</label><input type="date" name="attendanceDate" required /></div>
+                    <div class="ops2-field"><label>Status</label><select name="status" required><option value="present">Present</option><option value="absent">Absent</option><option value="late">Late</option></select></div>
+                    <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Attendance</button></div>
+                  </form>
+                </div>
+                <div id="tab-bulk" class="ops2-tab-panel">
+                  <form method="post" action="/admin/attendance-bulk" class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                    <div class="ops2-field"><label>Date</label><input type="date" name="attendanceDate" required /></div>
+                    <div class="ops2-field full"><label>Absent Roll Numbers</label><textarea name="absentRollNos" rows="3" placeholder="101, 105, 108"></textarea></div>
+                    <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" placeholder="Special class note" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Mark Attendance</button></div>
+                  </form>
+                </div>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Review</p>
+                    <h3>Attendance timeline</h3>
+                  </div>
+                </div>
+                <form method="get" action="/admin/dashboard" class="ops2-form-grid ops2-form-grid--tight">
+                  <input type="hidden" name="section" value="attendance" />
+                  <div class="ops2-field"><label>Month</label><input type="month" name="attendanceMonth" value="<%= attendanceMonthFilter %>" /></div>
+                  <div class="ops2-field"><label>Date</label><select name="attendanceDate"><option value="">All Dates</option><% attendanceDates.forEach((d) => { %><option value="<%= d.attendance_date %>" <%= attendanceDateFilter === d.attendance_date ? 'selected' : '' %>><%= formatDashboardDate(d.attendance_date) %></option><% }) %></select></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply Filters</button></div>
+                </form>
+                <div class="ops2-chip-row">
+                  <span class="ops2-chip"><strong><%= attendanceThisMonthCount %></strong> entries</span>
+                  <% if (attendanceDateFilter) { %>
+                    <a href="<%= attendanceReportHref %>" class="ops2-inline-link">Download PDF</a>
+                  <% } %>
+                  <a href="/admin/dashboard?section=attendance" class="ops2-inline-link">Clear Filter</a>
+                </div>
+              </section>
+            </section>
+
+            <% if (!attendanceDateFilter) { %>
+              <section class="ops2-panel">
+                <div class="empty-state">
+                  <strong>Select an attendance date to view records.</strong>
+                  <p>Choose a date above, apply the filter, then download the filtered attendance PDF if needed.</p>
+                </div>
+              </section>
+            <% } else if (!Object.keys(attendanceByDate || {}).length) { %>
+              <section class="ops2-panel">
+                <div class="empty-state">
+                  <strong>No attendance records found.</strong>
+                  <p>No student attendance is saved for the selected date.</p>
+                </div>
+              </section>
+            <% } %>
+
+            <% Object.keys(attendanceByDate || {}).forEach((day) => { %>
+              <section class="ops2-panel">
+                <div class="ops2-panel__header compact">
+                  <div>
+                    <p class="ops2-eyebrow">Attendance Date</p>
+                    <h3><%= formatDashboardDate(day) %></h3>
+                  </div>
+                </div>
+                <div class="ops2-table-shell">
+                  <table class="ops2-table">
+                    <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Status</th><th>Notes</th></tr></thead>
+                    <tbody>
+                      <% attendanceByDate[day].forEach((a) => { %>
+                        <tr>
+                          <td><%= a.roll_no %></td>
+                          <td><%= a.name %></td>
+                          <td><%= a.batch_name || '-' %></td>
+                          <td><span class="status <%= a.status %>"><%= a.status %></span></td>
+                          <td><%= a.notes || '-' %></td>
+                        </tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            <% }) %>
+          <% } %>
+
+          <% if (activeSection === 'fees') { %>
+            <% const pendingFeesCount = fees.filter((item) => item.status === 'pending').length; %>
+            <% const paidFeesCount = fees.filter((item) => item.status === 'paid').length; %>
+            <% const overdueFeesCount = fees.filter((item) => item.status === 'overdue').length; %>
+            <section class="ops2-metrics-grid ops2-metrics-grid--compact">
+              <article class="ops2-metric-card ops2-metric-card--success"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">₹</span><span class="ops2-metric-card__trend">This month</span></div><strong>₹<%= feesPaidThisMonthAmount.toFixed(0) %></strong><span class="ops2-metric-card__label">Collected</span><small><%= feesPaidThisMonth.length %> payments</small><div class="ops2-sparkbars"><span style="height:52%"></span><span style="height:71%"></span><span style="height:49%"></span><span style="height:83%"></span><span style="height:66%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--warning"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">!</span><span class="ops2-metric-card__trend">Action</span></div><strong><%= pendingFeesCount %></strong><span class="ops2-metric-card__label">Pending</span><small>Follow-up needed</small><div class="ops2-sparkbars"><span style="height:31%"></span><span style="height:54%"></span><span style="height:44%"></span><span style="height:63%"></span><span style="height:35%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--danger"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">•</span><span class="ops2-metric-card__trend">Risk</span></div><strong><%= overdueFeesCount %></strong><span class="ops2-metric-card__label">Overdue</span><small>Immediate recovery</small><div class="ops2-sparkbars"><span style="height:22%"></span><span style="height:31%"></span><span style="height:47%"></span><span style="height:58%"></span><span style="height:41%"></span></div></article>
+            </section>
+
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="fees-form-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Finance</p><h3>Add fee record</h3></div></div>
+                <form method="post" action="/admin/fees" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full">
+                    <label>Student Name / Roll Number</label>
+                    <input type="text" name="studentLookup" list="fees-student-options" data-student-picker="fees" placeholder="Type N to find Nilesh" autocomplete="off" required />
+                    <input type="hidden" name="rollNo" data-student-roll-target="fees" required />
+                    <p class="tiny-note">Start typing student name, then choose the student. Roll number is filled automatically.</p>
+                    <datalist id="fees-student-options">
+                      <% students.forEach((student) => { %>
+                        <option value="<%= student.name || 'Student' %> - Roll <%= student.roll_no %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                        <option value="<%= student.roll_no %> - <%= student.name || 'Student' %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                      <% }) %>
+                    </datalist>
+                  </div>
+                  <div class="ops2-field"><label>Amount</label><input type="number" name="amount" step="0.01" min="0" required /></div>
+                  <div class="ops2-field"><label>Status</label><select name="status" required><option value="pending">Pending</option><option value="paid">Paid</option><option value="overdue">Overdue</option></select></div>
+                  <div class="ops2-field"><label>Next Due Date (optional)</label><input type="date" name="dueDate" /></div>
+                  <div class="ops2-field"><label>Payment Date</label><input type="date" name="paymentDate" /></div>
+                  <div class="ops2-field"><label>Payment Mode</label><select name="paymentMode"><option value="">Not specified</option><option value="Cash">Cash</option><option value="UPI">UPI</option><option value="Bank Transfer">Bank Transfer</option><option value="Card">Card</option><option value="Cheque">Cheque</option></select></div>
+                  <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Fee</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Month Filter</p><h3>Fee records</h3></div></div>
+                <form method="get" action="/admin/dashboard" class="ops2-form-grid ops2-form-grid--tight">
+                  <input type="hidden" name="section" value="fees" />
+                  <div class="ops2-field"><label>Month</label><input type="month" name="feesMonth" value="<%= feesMonthFilter %>" /></div>
+                  <div class="ops2-field"><label>Date</label><input type="date" name="feesDate" value="<%= feesDateFilter %>" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply</button></div>
+                </form>
+                <div class="ops2-chip-row"><span class="ops2-chip"><strong><%= paidFeesCount %></strong> paid</span><span class="ops2-chip"><strong><%= pendingFeesCount %></strong> pending</span><a href="<%= feesReportHref %>" class="ops2-inline-link">Download PDF</a><a href="/admin/dashboard?section=fees" class="ops2-inline-link">Clear</a></div>
+              </section>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Ledger</p><h3>Fee records</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Next Due</th><th>Payment</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    <% fees.forEach((f) => { %>
+                      <tr>
+                        <td><%= f.roll_no %></td><td><%= f.name %></td><td><%= f.batch_name || '-' %></td><td><%= f.amount %></td><td><%= f.due_date || '-' %></td><td><%= f.payment_date || '-' %></td><td><span class="status <%= f.status %>"><%= f.status %></span></td><td><%= f.notes || '-' %></td>
+                        <td>
+                          <% if (f.due_date) { %>
+                            <form method="post" action="/admin/fees/<%= f.id %>/send-reminder">
+                              <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                              <button type="submit" class="ops2-inline-link-btn" <%= (f.parent_whatsapp_number || f.guardian_phone) ? '' : 'disabled' %>>Send Reminder</button>
+                            </form>
+                          <% } %>
+                          <% if (f.status === 'paid') { %>
+                            <a class="ops2-inline-link" href="/admin/fees/<%= f.id %>/receipt?disposition=inline" target="_blank">Print</a>
+                            <a class="ops2-inline-link" href="/admin/fees/<%= f.id %>/receipt?disposition=attachment">PDF</a>
+                          <% } %>
+                          <% if (!f.due_date && f.status !== 'paid') { %><span class="muted">-</span><% } %>
+                        </td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'papers') { %>
+            <section class="ops2-metrics-grid ops2-metrics-grid--compact">
+              <article class="ops2-metric-card ops2-metric-card--primary"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">↑</span><span class="ops2-metric-card__trend">Monthly</span></div><strong><%= papersThisMonthCount %></strong><span class="ops2-metric-card__label">Papers uploaded</span><small><%= papers.length %> total records</small><div class="ops2-sparkbars"><span style="height:40%"></span><span style="height:63%"></span><span style="height:58%"></span><span style="height:81%"></span><span style="height:70%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--neutral"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">◎</span><span class="ops2-metric-card__trend">Live</span></div><strong><%= activeUploadWindows %></strong><span class="ops2-metric-card__label">Active windows</span><small><%= upcomingUploadWindows %> upcoming</small><div class="ops2-sparkbars"><span style="height:34%"></span><span style="height:51%"></span><span style="height:46%"></span><span style="height:60%"></span><span style="height:42%"></span></div></article>
+            </section>
+
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="paper-upload-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Single Upload</p><h3>Assign paper to student</h3></div></div>
+                <form method="post" action="<%= appendCsrfToUrl('/admin/upload-paper-single') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Student Roll Number</label><input type="text" name="rollNo" required /></div>
+                  <div class="ops2-field"><label>Test Title</label><input type="text" name="testLabel" placeholder="Weekly Chemistry Test" /></div>
+                  <div class="ops2-field"><label>Marks Obtained</label><input type="number" name="marksObtained" step="0.01" min="0" /></div>
+                  <div class="ops2-field"><label>Max Marks</label><input type="number" name="maxMarks" step="0.01" min="0" /></div>
+                  <div class="ops2-field full"><label>Link to Upload Window</label><select name="answerRequestId"><option value="">General Paper</option><% answerRequestSummaries.forEach((request) => { %><option value="<%= request.id %>"><%= request.title %> | <%= request.batch_name || '-' %></option><% }) %></select></div>
+                  <div class="ops2-field full"><label>Select File</label><input type="file" name="paper" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload for Student</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Bulk Upload</p><h3>Assign multiple papers</h3></div></div>
+                <div class="ops2-rules">
+                  <p><code>101.pdf</code> assign only</p>
+                  <p><code>101_78_100.pdf</code> save 78/100</p>
+                </div>
+                <form method="post" action="<%= appendCsrfToUrl('/admin/upload-papers') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Select Files</label><input type="file" name="papers" multiple required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload and Assign</button></div>
+                </form>
+              </section>
+            </section>
+
+            <section class="ops2-panel" id="omr-import-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">Import OMR Results</p>
+                  <h3>CSV marks + optional scanned answer sheets</h3>
+                  <p class="tiny-note">CSV marks are matched strictly by Roll No. Answer sheet filenames must be exact Roll No, such as <code>101.pdf</code>; marks are never read from filenames.</p>
+                </div>
+              </div>
+              <form method="post" action="<%= appendCsrfToUrl('/admin/omr/import-results') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <div class="ops2-field"><label>Test Name</label><input type="text" name="testLabel" placeholder="NEET Mock Test 01" required /></div>
+                <div class="ops2-field"><label>Max Marks</label><input type="number" name="maxMarks" step="0.01" min="1" placeholder="Required for graphs" required /></div>
+                <div class="ops2-field full"><label>Result CSV</label><input type="file" name="omrCsv" accept=".csv,text/csv" required /></div>
+                <div class="ops2-field full"><label>Optional Answer Sheets ZIP/PDF/Image</label><input type="file" name="answerSheets" accept=".zip,.pdf,.jpg,.jpeg,.png,application/zip,application/pdf,image/jpeg,image/png" multiple /></div>
+                <div class="ops2-rules full">
+                  <p>Required CSV columns: <code>Roll No</code>, <code>Student Name</code>, <code>Physics Marks</code>, <code>Chemistry Marks</code>, <code>Biology Marks</code>, <code>Total Marks</code>, <code>Rank</code>.</p>
+                  <p>Unmatched Roll No values are reported and do not stop matched students from importing.</p>
+                </div>
+                <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Import OMR Results</button></div>
+              </form>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Academic Records</p><h3>All test papers</h3></div><form method="get" action="/admin/dashboard" class="ops2-inline-tools"><input type="hidden" name="section" value="papers" /><input type="month" name="papersMonth" value="<%= papersMonthFilter %>" /><button type="submit" class="ops2-primary-btn ops2-primary-btn--small">Apply</button></form></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Date</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    <% papers.forEach((p) => { %>
+                      <tr>
+                        <td><%= p.roll_no %></td><td><%= p.name %></td><td><%= p.batch_name || '-' %></td><td><%= p.test_label || p.original_name %></td><td><%= p.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td><td><%= p.uploaded_by_name || '-' %></td><td><%= p.marks_obtained !== null && p.max_marks !== null ? `${p.marks_obtained}/${p.max_marks}` : '-' %></td><td><%= p.upload_date %></td>
+                        <td class="ops2-actions-inline"><a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener" class="ops2-inline-link">Open</a><a href="/papers/<%= p.id %>/download" class="ops2-inline-link">Download</a><a href="/admin/papers/<%= p.id %>/debug" target="_blank" rel="noopener" class="ops2-inline-link">Debug</a><form method="post" action="/papers/<%= p.id %>/delete" class="inline-delete-form" onsubmit="return confirm('Delete this paper?');"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><input type="hidden" name="redirectTo" value="/admin/dashboard?section=papers" /><button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button></form></td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'omr') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="omr-import-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Import Preview</p><h3>Upload OScan result CSV</h3></div></div>
+                <form method="post" action="<%= appendCsrfToUrl('/admin/omr/import/preview') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Test Name</label><input type="text" name="testLabel" placeholder="NEET Mock Test 01" required /></div>
+                  <div class="ops2-field"><label>Max Marks fallback</label><input type="number" name="maxMarks" step="0.01" min="0" placeholder="Use if CSV has no max marks" /></div>
+                  <label class="ops2-check full"><input type="checkbox" name="overwrite" /> Overwrite duplicate roll numbers for this test</label>
+                  <div class="ops2-field full"><label>CSV / XLSX File</label><input type="file" name="omrFile" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Preview Import</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Answer Sheets</p><h3>Bulk link scanned OMR files</h3></div></div>
+                <div class="ops2-rules">
+                  <p>Name files by roll number: <code>101.pdf</code> or <code>101.jpg</code></p>
+                  <p>Existing OMR for the same test is replaced safely.</p>
+                </div>
+                <form method="post" action="<%= appendCsrfToUrl('/admin/omr/scans/upload') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Test Name</label><input type="text" name="testLabel" placeholder="Same test name used in import" required /></div>
+                  <div class="ops2-field full"><label>PDF / JPG Sheets or ZIP</label><input type="file" name="omrScans" accept=".pdf,.jpg,.jpeg,.png,.zip,application/pdf,image/jpeg,image/png,application/zip" multiple required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload OMR Sheets</button></div>
+                </form>
+              </section>
+            </section>
+
+            <% if (omrPreview) { %>
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Preview Ready</p>
+                    <h3><%= omrPreview.testLabel %></h3>
+                    <p class="tiny-note">Matched rows are committed in one transaction. Duplicates are ignored unless overwrite was selected.</p>
+                  </div>
+                  <div class="ops2-actions-inline">
+                    <form method="post" action="/admin/omr/import/commit"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-primary-btn ops2-primary-btn--small">Commit Import</button></form>
+                    <form method="post" action="/admin/omr/import/cancel"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-secondary-btn ops2-primary-btn--small">Clear</button></form>
+                  </div>
+                </div>
+                <div class="ops2-table-shell">
+                  <table class="ops2-table ops2-table--wide">
+                    <thead><tr><th>Row</th><th>Roll</th><th>Student</th><th>Marks</th><th>%</th><th>Rank</th><th>Correct</th><th>Wrong</th><th>Blank</th><th>Status</th><th>Error</th></tr></thead>
+                    <tbody>
+                      <% omrPreview.rows.slice(0, 100).forEach((row) => { %>
+                        <tr>
+                          <td><%= row.rowNumber %></td>
+                          <td><%= row.matchedRollNo || row.rollNo || row.barcode || '-' %></td>
+                          <td><%= row.studentName || '-' %></td>
+                          <td><%= row.obtainedMarks !== null && row.maxMarks !== null ? `${row.obtainedMarks}/${row.maxMarks}` : '-' %></td>
+                          <td><%= row.percentage !== null ? row.percentage : '-' %></td>
+                          <td><%= row.rank !== null ? row.rank : '-' %></td>
+                          <td><%= row.correctCount !== null ? row.correctCount : '-' %></td>
+                          <td><%= row.wrongCount !== null ? row.wrongCount : '-' %></td>
+                          <td><%= row.unattemptedCount !== null ? row.unattemptedCount : '-' %></td>
+                          <td><span class="status <%= row.status === 'ready' ? 'paid' : row.status === 'duplicate' ? 'pending' : 'overdue' %>"><%= row.status %></span></td>
+                          <td><%= row.error || '-' %></td>
+                        </tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            <% } %>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">OMR Records</p><h3>Imported results and linked sheets</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Marks</th><th>%</th><th>Rank</th><th>Subject Marks</th><th>OMR Sheet</th></tr></thead>
+                  <tbody>
+                    <% papers.filter((p) => p.paper_type === 'omr_result' || p.omr_scan_path).forEach((p) => { %>
+                      <tr>
+                        <td><%= p.roll_no %></td>
+                        <td><%= p.name %></td>
+                        <td><%= p.batch_name || '-' %></td>
+                        <td><%= p.test_label || p.original_name %></td>
+                        <td><%= p.marks_obtained !== null && p.max_marks !== null ? `${p.marks_obtained}/${p.max_marks}` : '-' %></td>
+                        <td><%= p.percentage !== null ? p.percentage : '-' %></td>
+                        <td><%= p.omr_rank !== null && p.omr_rank !== undefined ? `#${p.omr_rank}` : '-' %></td>
+                        <td>Phy: <%= p.physics_marks ?? '-' %>, Chem: <%= p.chemistry_marks ?? '-' %>, Bio: <%= p.biology_marks ?? '-' %></td>
+                        <td class="ops2-actions-inline">
+                          <% if (p.omr_scan_path) { %>
+                            <a href="/omr/<%= p.id %>/view" target="_blank" rel="noopener" class="ops2-inline-link">View</a>
+                            <a href="/omr/<%= p.id %>/download" class="ops2-inline-link">Download</a>
+                            <form method="post" action="/admin/omr/scans/<%= p.id %>/delete" class="inline-delete-form" onsubmit="return confirm('Delete this OMR sheet?');"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button></form>
+                          <% } else { %>
+                            <span class="muted">Not uploaded</span>
+                          <% } %>
+                        </td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Import History</p><h3>Recent OMR imports</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table">
+                  <thead><tr><th>Date</th><th>Test</th><th>File</th><th>Rows</th><th>Matched</th><th>Unmatched</th><th>Duplicates</th><th>By</th></tr></thead>
+                  <tbody>
+                    <% (omrImports || []).forEach((item) => { %>
+                      <tr>
+                        <td><%= item.imported_at %></td>
+                        <td><%= item.test_label %></td>
+                        <td><%= item.original_file_name %></td>
+                        <td><%= item.row_count %></td>
+                        <td><%= item.matched_count %></td>
+                        <td><%= item.unmatched_count %></td>
+                        <td><%= item.duplicate_count %></td>
+                        <td><%= item.imported_by_name || '-' %></td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'notes') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="notes-publish-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Publish</p><h3>Add batch note / video link</h3></div></div>
+                <form method="post" action="/admin/notes" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Notice Target</label><select name="noticeTarget" required><option value="batch">Selected Class</option><option value="all">All Students</option><option value="selected">Selected Students</option></select></div>
+                  <div class="ops2-field"><label>Batch / Class</label><select name="batchId"><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                  <div class="ops2-field"><label>Title</label><input type="text" name="title" placeholder="Physics Revision Notes" required /></div>
+                  <div class="ops2-field full"><label>Resource URL</label><input type="url" name="resourceUrl" placeholder="https://..." /></div>
+                  <div class="ops2-field full"><label>Description</label><textarea name="description" rows="3"></textarea></div>
+                  <label class="ops2-check full"><input type="checkbox" name="sendWhatsApp" checked /> Send WhatsApp notification for this notice</label>
+                  <div class="ops2-field full">
+                    <label>Selected Students</label>
+                    <div class="ops2-table-shell ops2-table-shell--compact" style="max-height:220px;overflow:auto;">
+                      <table class="ops2-table ops2-table--students">
+                        <thead><tr><th>Select</th><th>Roll</th><th>Name</th><th>WhatsApp</th></tr></thead>
+                        <tbody>
+                          <% students.filter((student) => student.whatsapp_number || student.contact_phone).forEach((student) => { %>
+                            <tr>
+                              <td><input type="checkbox" name="studentIds" value="<%= student.id %>" /></td>
+                              <td><%= student.roll_no %></td>
+                              <td><%= student.name %></td>
+                              <td><%= student.whatsapp_number || student.contact_phone || '-' %></td>
+                            </tr>
+                          <% }) %>
+                        </tbody>
+                      </table>
+                    </div>
+                    <p class="tiny-note">Checkboxes are used only when Notice Target is “Selected Students”.</p>
+                  </div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Publish Notice</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Library</p><h3>Published batch notes</h3></div></div>
+                <div class="ops2-table-shell">
+                  <table class="ops2-table ops2-table--wide">
+                    <thead><tr><th>Title</th><th>Batch</th><th>Link</th><th>Description</th><th>Date</th></tr></thead>
+                    <tbody>
+                      <% notes.forEach((n) => { %>
+                        <tr><td><%= n.title %></td><td><%= n.batch_name || '-' %></td><td><a href="<%= n.resource_url %>" target="_blank" rel="noopener" class="ops2-inline-link">Open Link</a></td><td><%= n.description || '-' %></td><td><%= n.created_at %></td></tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'whatsapp') { %>
+            <section class="ops2-metrics-grid ops2-metrics-grid--compact">
+              <article class="ops2-metric-card ops2-metric-card--<%= whatsappSettings.hasRequiredSendConfig ? 'success' : 'warning' %>">
+                <div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">WA</span><span class="ops2-metric-card__trend">Cloud API</span></div>
+                <strong><%= whatsappSettings.hasRequiredSendConfig ? 'Ready' : 'Setup' %></strong>
+                <span class="ops2-metric-card__label">WhatsApp Status</span>
+                <small><%= whatsappSettings.phoneNumberId ? `Phone ID ${whatsappSettings.phoneNumberId}` : 'Phone Number ID missing' %></small>
+              </article>
+              <article class="ops2-metric-card ops2-metric-card--neutral">
+                <div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">☏</span><span class="ops2-metric-card__trend">Guardians</span></div>
+                <strong><%= students.filter((student) => student.parent_whatsapp_number || student.guardian_phone || student.whatsapp_number || student.contact_phone).length %></strong>
+                <span class="ops2-metric-card__label">Reachable Contacts</span>
+                <small>Out of <%= students.length %> students</small>
+              </article>
+            </section>
+
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="whatsapp-settings-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Meta Cloud API</p><h3>WhatsApp settings</h3></div></div>
+                <form method="post" action="/admin/whatsapp/settings" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full">
+                    <label>Access Token</label>
+                    <input type="password" name="accessToken" placeholder="<%= whatsappSettings.accessTokenSaved ? 'Saved - leave blank to keep current token' : 'Paste permanent access token' %>" <%= whatsappSettings.accessTokenSaved ? '' : 'required' %> />
+                  </div>
+                  <div class="ops2-field"><label>Phone Number ID</label><input type="text" name="phoneNumberId" value="<%= whatsappSettings.phoneNumberId %>" required /></div>
+                  <div class="ops2-field"><label>Business Account ID</label><input type="text" name="businessAccountId" value="<%= whatsappSettings.businessAccountId %>" /></div>
+                  <div class="ops2-field full">
+                    <label>Verify Token</label>
+                    <input type="password" name="verifyToken" placeholder="<%= whatsappSettings.verifyTokenSaved ? 'Saved - leave blank to keep current token' : 'Webhook verify token' %>" />
+                  </div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save WhatsApp Settings</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Connection</p><h3>Test & automate</h3></div></div>
+                <form method="post" action="/admin/whatsapp/test" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Test Phone Number</label><input type="text" name="testPhone" placeholder="919876543210" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Test Connection</button></div>
+                </form>
+                <div class="ops2-divider"></div>
+                <form method="post" action="/admin/whatsapp/fee-reminders/due" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Send reminders due in next days</label><input type="number" name="daysBefore" min="0" value="7" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Run Fee Reminders</button></div>
+                </form>
+              </section>
+            </section>
+
+            <section class="ops2-panel" id="whatsapp-broadcast-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Broadcast</p><h3>Send announcement</h3></div></div>
+              <form method="post" action="/admin/whatsapp/broadcast" class="ops2-form-grid">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <div class="ops2-field"><label>Target</label><select name="targetMode" required><option value="all">All Students</option><option value="batch">Selected Batch</option><option value="selected">Selected Students</option></select></div>
+                <div class="ops2-field"><label>Batch</label><select name="batchId"><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                <div class="ops2-field full"><label>Announcement</label><textarea name="message" rows="4" maxlength="1000" placeholder="Write announcement for parents..." required></textarea></div>
+                <div class="ops2-field full">
+                  <label>Selected Students</label>
+                  <div class="ops2-table-shell ops2-table-shell--compact" style="max-height:220px;overflow:auto;">
+                    <table class="ops2-table ops2-table--students">
+                      <thead><tr><th>Select</th><th>Roll</th><th>Name</th><th>WhatsApp</th></tr></thead>
+                      <tbody>
+                        <% students.filter((student) => student.whatsapp_number || student.contact_phone || student.parent_whatsapp_number || student.guardian_phone).forEach((student) => { %>
+                          <tr>
+                            <td><input type="checkbox" name="studentIds" value="<%= student.id %>" /></td>
+                            <td><%= student.roll_no %></td>
+                            <td><%= student.name %></td>
+                            <td><%= student.whatsapp_number || student.contact_phone || student.parent_whatsapp_number || student.guardian_phone %></td>
+                          </tr>
+                        <% }) %>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p class="tiny-note">Checkboxes are used only when Target is “Selected Students”.</p>
+                </div>
+                <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Send Announcement</button></div>
+              </form>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Audit</p><h3>Recent WhatsApp logs</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Time</th><th>Student</th><th>Phone</th><th>Type</th><th>Status</th><th>Meta ID</th></tr></thead>
+                  <tbody>
+                    <% whatsappLogs.forEach((log) => { %>
+                      <tr>
+                        <td><%= log.created_at %></td>
+                        <td><%= log.name || log.roll_no || '-' %></td>
+                        <td><%= log.phone_number %></td>
+                        <td><%= log.message_type %></td>
+                        <td><span class="status <%= log.status %>"><%= log.status %></span></td>
+                        <td><%= log.meta_message_id || '-' %></td>
+                      </tr>
+                    <% }) %>
+                    <% if (!whatsappLogs.length) { %>
+                      <tr><td colspan="6" class="muted">No WhatsApp messages sent yet.</td></tr>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'notifications') { %>
+            <section class="ops2-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">Automation Audit</p>
+                  <h3>WhatsApp notification logs</h3>
+                </div>
+                <a href="/admin/dashboard?section=settings" class="ops2-inline-link">Notification Settings</a>
+              </div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Student</th><th>Phone</th><th>Type</th><th>Status</th><th>Sent at</th><th>Message</th></tr></thead>
+                  <tbody>
+                    <% notificationLogs.forEach((log) => { %>
+                      <tr>
+                        <td><%= log.name || log.roll_no || '-' %></td>
+                        <td><%= log.phone_number || '-' %></td>
+                        <td><%= log.type %></td>
+                        <td><span class="status <%= log.status %>"><%= log.status %></span></td>
+                        <td><%= log.sent_at || log.created_at || '-' %></td>
+                        <td><%= log.message %></td>
+                      </tr>
+                    <% }) %>
+                    <% if (!notificationLogs.length) { %>
+                      <tr><td colspan="6" class="muted">No automation notifications have been recorded yet.</td></tr>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'settings') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="settings-profile-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Branding</p><h3>Profile & branding</h3></div></div>
+                <form method="post" action="/admin/settings/profile" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Admin Display Name</label><input type="text" name="adminDisplayName" value="<%= user.name || '' %>" required /></div>
+                  <div class="ops2-field"><label>Admin Contact Number</label><input type="text" name="adminContactPhone" value="<%= adminProfile?.contact_phone || user.contactPhone || '' %>" placeholder="9876543210" /></div>
+                  <div class="ops2-field">
+                    <label>Admin OTP Email</label>
+                    <input type="email" name="adminEmail" value="<%= adminProfile?.email || user.email || '' %>" placeholder="admin@class.com" required />
+                    <p class="tiny-note">Login and password reset OTPs will be sent to this email.</p>
+                  </div>
+                  <div class="ops2-field"><label>Coaching Name</label><input type="text" name="coachingName" value="<%= coaching?.name || '' %>" required /></div>
+                  <div class="ops2-field full"><label>Portal Display Name</label><input type="text" name="brandName" value="<%= coaching?.brand_name || coaching?.name || '' %>" /></div>
+                  <div class="ops2-field"><label>Contact Email</label><input type="email" name="contactEmail" value="<%= coaching?.contact_email || '' %>" /></div>
+                  <div class="ops2-field"><label>Logo URL</label><input type="url" name="logoUrl" value="<%= coaching?.logo_url || '' %>" /></div>
+                  <div class="ops2-field"><label>Theme Primary</label><input type="text" name="themePrimary" value="<%= coaching?.theme_primary || '#1769aa' %>" /></div>
+                  <div class="ops2-field"><label>Theme Background</label><input type="text" name="themeBackground" value="<%= coaching?.theme_background || '#f3f6fb' %>" /></div>
+                  <div class="ops2-field full"><label>Theme Surface</label><input type="text" name="themeSurface" value="<%= coaching?.theme_surface || '#ffffff' %>" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Settings</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Security</p><h3>Update password</h3></div></div>
+                <form method="post" action="/admin/settings/password" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Current Password</label><input type="password" name="oldPassword" required /></div>
+                  <div class="ops2-field full"><label>New Password</label><input type="password" name="newPassword" minlength="8" required /></div>
+                  <div class="ops2-field full"><label>Confirm New Password</label><input type="password" name="confirmPassword" minlength="8" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Change Password</button></div>
+                </form>
+              </section>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">WhatsApp Notifications</p>
+                  <h3>Automation toggles</h3>
+                </div>
+                <a href="/admin/dashboard?section=notifications" class="ops2-inline-link">View Logs</a>
+              </div>
+              <form method="post" action="/admin/settings/whatsapp-notifications" class="ops2-form-grid">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <label class="ops2-check full"><input type="checkbox" name="attendanceAlertsEnabled" <%= whatsappSettings.attendanceAlertsEnabled ? 'checked' : '' %> /> Attendance alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="feeAlertsEnabled" <%= whatsappSettings.feeAlertsEnabled ? 'checked' : '' %> /> Fee alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="resultAlertsEnabled" <%= whatsappSettings.resultAlertsEnabled ? 'checked' : '' %> /> Result alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="testPaperAlertsEnabled" <%= whatsappSettings.testPaperAlertsEnabled ? 'checked' : '' %> /> Test paper alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="noticeAlertsEnabled" <%= whatsappSettings.noticeAlertsEnabled ? 'checked' : '' %> /> Notice alerts</label>
+                <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Notification Toggles</button></div>
+              </form>
+            </section>
+          <% } %>
+        </main>
+      <% } %>
+    </div>
+  </div>
+
+  <script>
+    const tabButtons = document.querySelectorAll('.ops2-tab-btn');
+    const tabPanels = document.querySelectorAll('.ops2-tab-panel');
+    const trackerFilters = document.querySelectorAll('.tracker-filter');
+    const singleSubmitForms = document.querySelectorAll('form[data-single-submit]');
+
+    tabButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab;
+        tabButtons.forEach((b) => b.classList.remove('active'));
+        tabPanels.forEach((p) => p.classList.remove('active'));
+        btn.classList.add('active');
+        const panel = document.getElementById(`tab-${tab}`);
+        if (panel) panel.classList.add('active');
+      });
+    });
+
+    trackerFilters.forEach((select) => {
+      select.addEventListener('change', () => {
+        const trackerId = select.dataset.trackerId;
+        const mode = select.value;
+        document.querySelectorAll(`[data-tracker-panel="${trackerId}"]`).forEach((panel) => {
+          panel.classList.toggle('active', panel.dataset.trackerMode === mode);
+        });
+      });
+    });
+
+    singleSubmitForms.forEach((form) => {
+      form.addEventListener('submit', () => {
+        const submitButtons = form.querySelectorAll('button[type="submit"]');
+        submitButtons.forEach((button) => {
+          button.disabled = true;
+          if (!button.dataset.originalText) {
+            button.dataset.originalText = button.textContent;
+          }
+          button.textContent = 'Saving...';
+        });
+      });
+    });
+
+    document.querySelectorAll('[data-student-picker]').forEach((input) => {
+      const pickerKey = input.dataset.studentPicker;
+      const rollTarget = document.querySelector(`[data-student-roll-target="${pickerKey}"]`);
+      const options = Array.from(document.querySelectorAll(`#${input.getAttribute('list')} option`));
+
+      const resolveRollNumber = () => {
+        const typedValue = input.value.trim().toLowerCase();
+        const exactOption = options.find((option) => option.value.trim().toLowerCase() === typedValue);
+        const rollMatch = input.value.trim().match(/\broll\s+([^\s-]+)/i) || input.value.trim().match(/^([^\s-]+)\s+-/);
+        const directRollOption = options.find((option) => String(option.dataset.roll || '').toLowerCase() === typedValue);
+        const selectedRoll = exactOption?.dataset.roll || directRollOption?.dataset.roll || rollMatch?.[1] || '';
+
+        if (rollTarget) rollTarget.value = selectedRoll;
+        return selectedRoll;
+      };
+
+      input.addEventListener('input', resolveRollNumber);
+      input.form?.addEventListener('submit', (event) => {
+        if (!resolveRollNumber()) {
+          event.preventDefault();
+          input.focus();
+          alert('Please choose a student from the suggestions before saving.');
+        }
+      });
+    });
+  </script>
+</body>
+</html>

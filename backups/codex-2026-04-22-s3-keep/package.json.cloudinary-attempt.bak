@@ -1,0 +1,39 @@
+{
+  "name": "coaching-classes-system",
+  "version": "1.0.0",
+  "description": "Coaching classes management system with admin/student login, paper assignment, attendance, and fees",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node src/app.js",
+    "migrate:papers:cloud": "node scripts/migrate-papers-to-cloud.js",
+    "check:cloud": "node scripts/check-cloud-storage.js"
+  },
+  "keywords": [
+    "coaching",
+    "school",
+    "attendance",
+    "fees",
+    "papers"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1000.0",
+    "@aws-sdk/s3-request-presigner": "^3.1000.0",
+    "@neondatabase/serverless": "^1.0.2",
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.9.0",
+    "dotenv": "^17.3.1",
+    "ejs": "^3.1.10",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "multer": "^1.4.5-lts.2",
+    "nodemailer": "^8.0.4",
+    "pg": "^8.20.0",
+    "sqlite3": "^5.1.7",
+    "twilio": "^5.13.1",
+    "ws": "^8.20.0"
+  }
+}

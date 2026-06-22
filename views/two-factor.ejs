@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.brandName || 'Demo Coaching' %> - Two-Factor Verification</title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body style="<%= branding?.cssVars || '' %>">
+  <div class="container small">
+    <div class="card login-hero">
+      <p class="eyebrow">Second Step</p>
+      <h1>Verify <%= roleLabel %> Login</h1>
+      <p class="muted">Password is correct. Send a one-time verification code to your saved email to finish signing in.</p>
+    </div>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <div class="grid two">
+      <div class="card">
+        <h2>Send Verification Code</h2>
+        <p class="muted">Email OTP is enabled for this account.</p>
+
+        <form method="post" action="/auth/2fa/send-otp">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <input type="hidden" name="channel" value="email" />
+          <button type="submit" class="btn" <%= otpChannels?.email?.available ? '' : 'disabled' %>>
+            Send Code to Email
+          </button>
+          <p class="tiny-note">
+            <%= otpChannels?.email?.available ? (otpChannels.email.masked || 'Email available') : (otpChannels?.email?.reason || 'Email not available') %>
+          </p>
+        </form>
+
+        <% if (otpState) { %>
+          <div class="alert <%= otpState.expired ? 'error' : 'warning' %>">
+            <% if (otpState.expired) { %>
+              Last verification code expired. Request a new one.
+            <% } else { %>
+              Code sent to <strong><%= otpState.destinationMasked %></strong>. It expires in <strong><%= otpState.remainingSeconds %>s</strong>.
+            <% } %>
+          </div>
+        <% } %>
+      </div>
+
+      <form method="post" action="/auth/2fa/verify" class="card">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+        <h2>Enter Verification Code</h2>
+        <label>One-Time Code</label>
+        <input type="text" name="otp" inputmode="numeric" maxlength="6" placeholder="6 digit code" required />
+        <button type="submit" class="btn">Verify and Continue</button>
+        <a href="/login" class="mini-link">Back to Login</a>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

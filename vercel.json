@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/favicon.ico",
+      "destination": "/public/scc-icon.svg"
+    },
+    {
+      "source": "/favicon.png",
+      "destination": "/public/scc-icon.svg"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/api/index.js"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/cron/whatsapp/onboarding-retries",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/cron/whatsapp/fee-reminders",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/cron/whatsapp/monthly-parent-reports",
+      "schedule": "0 5 1 * *"
+    }
+  ]
+}

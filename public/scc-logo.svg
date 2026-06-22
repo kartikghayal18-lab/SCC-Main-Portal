@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-labelledby="title">
+  <title id="title">SCC - Your Success Is Our Aim</title>
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#fde600"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="420" rx="58" fill="#35438f"/>
+  <g transform="translate(68 58)" fill="none" stroke="url(#gold)" stroke-width="20">
+    <circle cx="135" cy="135" r="119"/>
+    <circle cx="135" cy="135" r="82"/>
+    <circle cx="135" cy="135" r="45"/>
+  </g>
+  <g fill="url(#gold)">
+    <path d="M202 206 306 102l18 18-104 104z"/>
+    <path d="m302 102 13-42 23 20 35-10-10 35 20 23-42 13z"/>
+    <circle cx="203" cy="207" r="16"/>
+  </g>
+  <text x="408" y="220" fill="#fff" font-family="Arial,Helvetica,sans-serif" font-size="170" font-weight="700" letter-spacing="10">SCC</text>
+  <text x="410" y="318" fill="#fff" font-family="Arial,Helvetica,sans-serif" font-size="42" font-weight="700" letter-spacing="1">YOUR SUCCESS IS OUR AIM!</text>
+</svg>

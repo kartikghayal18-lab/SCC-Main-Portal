@@ -1,0 +1,369 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.brandName || 'Demo Coaching' %> - Owner Dashboard</title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body class="dashboard-shell" style="<%= branding?.cssVars || '' %>">
+  <div class="container wide">
+    <div class="topbar card hero-card">
+      <div>
+        <p class="eyebrow">Platform Owner</p>
+        <h1>Owner Dashboard</h1>
+        <p class="muted">Manage coaching access, seat limits, trial approvals, and tenant portals from one place.</p>
+        <div class="hero-chip-row">
+          <span class="info-chip">Coachings <strong><%= stats.totalCoachings %></strong></span>
+          <span class="info-chip">Active <strong><%= stats.activeCoachings %></strong></span>
+          <span class="info-chip">Students <strong><%= stats.totalStudents %></strong></span>
+          <span class="info-chip">Pending Trials <strong><%= stats.pendingTrialRequests %></strong></span>
+        </div>
+      </div>
+      <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary">Logout</button></form>
+    </div>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <section class="card">
+      <form method="post" action="/owner/branches/select" class="grid two">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+        <label>
+          Branch View
+          <select name="branchId" required>
+            <% (branches || []).forEach((branch) => { %>
+              <option value="<%= branch.id %>" <%= selectedBranch && Number(selectedBranch.id) === Number(branch.id) ? 'selected' : '' %>>
+                <%= branch.name %>
+              </option>
+            <% }) %>
+          </select>
+        </label>
+        <div>
+          <button type="submit" class="btn">Switch Branch</button>
+        </div>
+      </form>
+      <% if (selectedBranch) { %>
+        <div class="hero-chip-row">
+          <span class="info-chip">Selected <strong><%= selectedBranch.name %></strong></span>
+          <span class="info-chip">Students <strong><%= selectedBranch.student_count %></strong></span>
+          <span class="info-chip">Admins <strong><%= selectedBranch.admin_count %></strong></span>
+          <span class="info-chip">Batches <strong><%= selectedBranch.batch_count %></strong></span>
+        </div>
+      <% } %>
+    </section>
+
+    <section class="section-switcher card">
+      <div class="sidebar-brand">
+        <div class="sidebar-brand-top">
+          <img src="<%= branding?.logoUrl || '/public/scc-logo.svg' %>" alt="<%= branding?.brandName || 'SCC' %> logo" class="brand-logo" />
+          <div>
+            <p class="sidebar-kicker">Owner Console</p>
+            <p class="sidebar-title"><%= branding?.ownerConsoleLabel || ((branding?.brandName || 'Demo Coaching') + ' Control') %></p>
+          </div>
+        </div>
+        <p class="sidebar-copy">Manage coaching tenants, subscriptions, and trial approvals from one calm command panel.</p>
+      </div>
+      <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/owner/dashboard?section=overview">Overview</a>
+      <a class="sec-btn <%= activeSection === 'coachings' ? 'active' : '' %>" href="/owner/dashboard?section=coachings">Coaching Tenants</a>
+      <a class="sec-btn <%= activeSection === 'trial-requests' ? 'active' : '' %>" href="/owner/dashboard?section=trial-requests">Trial Requests</a>
+    </section>
+
+    <% if (activeSection === 'overview') { %>
+      <section class="stats-grid">
+        <div class="stat-card"><p>Total Coachings</p><h3><%= stats.totalCoachings %></h3></div>
+        <div class="stat-card"><p>Active Coachings</p><h3><%= stats.activeCoachings %></h3></div>
+        <div class="stat-card"><p>Total Students</p><h3><%= stats.totalStudents %></h3></div>
+        <div class="stat-card"><p>Total Seat Capacity</p><h3><%= stats.totalSeatCapacity ? stats.totalSeatCapacity : '-' %></h3></div>
+        <div class="stat-card"><p>Expiring in 2 Days</p><h3><%= stats.expiringSoon %></h3></div>
+        <div class="stat-card"><p>Pending Trial Requests</p><h3><%= stats.pendingTrialRequests %></h3></div>
+      </section>
+
+      <section class="card">
+        <h2>How SaaS Login Works</h2>
+        <p class="muted">Each coaching gets a unique coaching code and portal link. Coaching admins and students log in with that coaching code, so every dashboard query is automatically filtered to that coaching only.</p>
+      </section>
+
+      <section class="card">
+        <h2>Trial Request Inbox</h2>
+        <% const pendingTrials = (trialRequests || []).filter((request) => request.status === 'pending'); %>
+        <% if (!pendingTrials.length) { %>
+          <p class="muted">No pending trial requests right now.</p>
+        <% } else { %>
+          <table>
+            <tr><th>Class</th><th>Applicant</th><th>Contact</th><th>Email</th><th>WhatsApp</th><th>Students</th><th>Status</th></tr>
+            <% pendingTrials.slice(0, 5).forEach((request) => { %>
+              <tr>
+                <td><%= request.class_name %></td>
+                <td><%= request.applicant_name %></td>
+                <td><%= request.contact_phone %></td>
+                <td><%= request.email %></td>
+                <td><%= request.whatsapp_number %></td>
+                <td><%= request.student_requirement %></td>
+                <td><span class="status pending"><%= request.status %></span></td>
+              </tr>
+            <% }) %>
+          </table>
+          <p class="tiny-note">Open the Trial Requests tab to approve or reject them.</p>
+        <% } %>
+      </section>
+    <% } %>
+
+    <% if (activeSection === 'coachings') { %>
+      <section class="grid two">
+        <div class="card">
+          <h2>Create Coaching Tenant</h2>
+          <form method="post" action="/owner/coachings">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+            <label>Coaching Name</label>
+            <input type="text" name="name" required />
+
+            <label>Coaching Code / Slug</label>
+            <input type="text" name="slug" placeholder="e.g. alpha-jee-academy" required />
+
+            <label>Contact Email</label>
+            <input type="email" name="contactEmail" />
+
+            <label>Admin Username</label>
+            <input type="text" name="adminUsername" required />
+
+            <label>Admin Display Name</label>
+            <input type="text" name="adminName" />
+
+            <label>Admin Contact Number</label>
+            <input type="text" name="adminContactPhone" />
+
+            <label>Admin Email</label>
+            <input type="email" name="adminEmail" />
+
+            <label>Temporary Admin Password</label>
+            <input type="password" name="adminPassword" required />
+            <p class="tiny-note">The coaching admin will be forced to change this temporary password on first login.</p>
+
+            <label>Plan Name</label>
+            <input type="text" name="planName" placeholder="Starter, Gold, Premium, Custom" required />
+
+            <label>Student Limit</label>
+            <input type="number" name="maxStudents" min="1" step="1" placeholder="How many students this coaching can add" required />
+
+            <label>Subscription Status</label>
+            <select name="subscriptionStatus" required>
+              <option value="active">Active</option>
+              <option value="trial">Trial</option>
+              <option value="suspended">Suspended</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+
+            <label>Subscription Start</label>
+            <input type="date" name="subscriptionStartedAt" />
+
+            <label>Subscription End</label>
+            <input type="date" name="subscriptionEndsAt" />
+
+            <button type="submit" class="btn">Create Coaching</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Tenant Access</h2>
+          <p class="muted">Each coaching can have its own plan name and student limit. Share the portal URL with each coaching and every login stays isolated to that tenant.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Coaching Tenants</h2>
+        <table>
+          <tr>
+            <th>Coaching</th>
+            <th>Code</th>
+            <th>Tuition Owner</th>
+            <th>Students</th>
+            <th>Active Batches</th>
+            <th>Completed</th>
+            <th>Oldest Batch Age</th>
+            <th>Plan</th>
+            <th>Limit</th>
+            <th>Status</th>
+            <th>Ends</th>
+            <th>Portal</th>
+          </tr>
+          <% coachings.forEach((coaching) => { %>
+            <tr>
+              <td>
+                <strong><%= coaching.name %></strong>
+                <div class="tiny-note"><%= coaching.brand_name || coaching.name %></div>
+              </td>
+              <td><code><%= coaching.slug %></code></td>
+              <td>
+                <strong><%= coaching.admin_name || coaching.admin_username || '-' %></strong>
+                <div class="tiny-note">Contact: <%= coaching.admin_contact_phone || '-' %></div>
+                <div class="tiny-note">Email: <%= coaching.admin_email || '-' %></div>
+              </td>
+              <td>
+                <%= coaching.studentUsage.count %>
+                <% if (coaching.studentUsage.limit !== null) { %>
+                  / <%= coaching.studentUsage.limit %>
+                <% } else { %>
+                  / Unlimited
+                <% } %>
+              </td>
+              <td><%= coaching.activeBatchCount %></td>
+              <td><%= coaching.completedBatchCount %></td>
+              <td><%= coaching.oldestBatchAge || '-' %></td>
+              <td><%= coaching.plan_name || '-' %></td>
+              <td><%= coaching.max_students === null ? 'Unlimited' : coaching.max_students %></td>
+              <td><span class="status <%= coaching.subscription_status === 'active' ? 'paid' : coaching.subscription_status === 'trial' ? 'pending' : 'overdue' %>"><%= coaching.subscription_status %></span></td>
+              <td>
+                <%= coaching.subscription_ends_at || '-' %>
+                <% if (coaching.subscriptionState.notice) { %>
+                  <div class="tiny-note warning"><%= coaching.subscriptionState.notice %></div>
+                <% } %>
+              </td>
+              <td><a href="<%= coaching.portal_url %>" target="_blank" rel="noopener">Open Portal</a></td>
+            </tr>
+            <tr>
+              <td colspan="12">
+                <form method="post" action="/owner/coachings/<%= coaching.id %>/subscription" class="owner-inline-form">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <label>Plan Name</label>
+                  <input type="text" name="planName" value="<%= coaching.plan_name || '' %>" required />
+                  <label>Student Limit</label>
+                  <input type="number" name="maxStudents" min="1" step="1" value="<%= coaching.max_students ?? '' %>" required />
+                  <label>Status</label>
+                  <select name="subscriptionStatus" required>
+                    <option value="active" <%= coaching.subscription_status === 'active' ? 'selected' : '' %>>Active</option>
+                    <option value="trial" <%= coaching.subscription_status === 'trial' ? 'selected' : '' %>>Trial</option>
+                    <option value="suspended" <%= coaching.subscription_status === 'suspended' ? 'selected' : '' %>>Suspended</option>
+                    <option value="cancelled" <%= coaching.subscription_status === 'cancelled' ? 'selected' : '' %>>Cancelled</option>
+                  </select>
+                  <label>Start</label>
+                  <input type="date" name="subscriptionStartedAt" value="<%= coaching.subscription_started_at || '' %>" />
+                  <label>End</label>
+                  <input type="date" name="subscriptionEndsAt" value="<%= coaching.subscription_ends_at || '' %>" />
+                  <button type="submit" class="btn compact">Save Subscription</button>
+                </form>
+              </td>
+            </tr>
+            <tr>
+              <td colspan="12">
+                <div class="owner-manage-grid">
+                  <form method="post" action="/owner/coachings/<%= coaching.id %>/branding" class="card embedded-card">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <h3>Portal Branding</h3>
+                    <label>Coaching Name</label>
+                    <input type="text" name="name" value="<%= coaching.name %>" required />
+
+                    <label>Brand Name</label>
+                    <input type="text" name="brandName" value="<%= coaching.brand_name || coaching.name %>" placeholder="Name shown inside portal" />
+
+                    <label>Tuition Owner Name</label>
+                    <input type="text" name="adminName" value="<%= coaching.admin_name || '' %>" placeholder="Main class owner / admin name" />
+
+                    <label>Tuition Owner Contact Number</label>
+                    <input type="text" name="adminContactPhone" value="<%= coaching.admin_contact_phone || '' %>" placeholder="9876543210" />
+
+                    <label>Tuition Owner Email</label>
+                    <input type="email" name="adminEmail" value="<%= coaching.admin_email || '' %>" placeholder="owner@class.com" />
+
+                    <label>Logo URL</label>
+                    <input type="url" name="logoUrl" value="<%= coaching.logo_url || '' %>" placeholder="https://..." />
+
+                    <label>Contact Email</label>
+                    <input type="email" name="contactEmail" value="<%= coaching.contact_email || '' %>" />
+
+                    <div class="branding-colors">
+                      <div>
+                        <label>Theme Primary</label>
+                        <input type="text" name="themePrimary" value="<%= coaching.theme_primary || '#1769aa' %>" placeholder="#1769aa" />
+                      </div>
+                      <div>
+                        <label>Theme Background</label>
+                        <input type="text" name="themeBackground" value="<%= coaching.theme_background || '#f3f6fb' %>" placeholder="#f3f6fb" />
+                      </div>
+                      <div>
+                        <label>Theme Surface</label>
+                        <input type="text" name="themeSurface" value="<%= coaching.theme_surface || '#ffffff' %>" placeholder="#ffffff" />
+                      </div>
+                    </div>
+
+                    <p class="muted">These settings update the client portal branding, logo, and dashboard colors for this coaching.</p>
+                    <button type="submit" class="btn compact">Save Branding</button>
+                  </form>
+
+                  <div class="card embedded-card danger-card">
+                    <h3>Danger Zone</h3>
+                    <p class="muted">Deleting a coaching removes its admin, all students, papers, notes, attendance, fees, and portal access permanently.</p>
+                    <p class="muted"><strong>Portal:</strong> <a href="<%= coaching.portal_url %>" target="_blank" rel="noopener"><%= coaching.portal_url %></a></p>
+                    <form method="post" action="/owner/coachings/<%= coaching.id %>/delete" onsubmit="return confirm('Delete <%= coaching.name %>? This will permanently remove all class data and cannot be undone.');">
+                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                      <button type="submit" class="btn danger">Delete Coaching Permanently</button>
+                    </form>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          <% }) %>
+        </table>
+      </section>
+    <% } %>
+
+    <% if (activeSection === 'trial-requests') { %>
+      <section class="card">
+        <h2>Trial Requests</h2>
+        <% if (!trialRequests.length) { %>
+          <p class="muted">No trial requests submitted yet.</p>
+        <% } %>
+
+        <div class="trial-request-list">
+          <% trialRequests.forEach((request) => { %>
+            <details class="trial-accordion" <%= request.status === 'pending' ? 'open' : '' %>>
+              <summary class="trial-accordion-summary">
+                <div>
+                  <strong><%= request.class_name %></strong>
+                  <div class="tiny-note">Applicant: <%= request.applicant_name %> | Students: <%= request.student_requirement %></div>
+                </div>
+                <span class="status <%= request.status === 'approved' ? 'paid' : request.status === 'pending' ? 'pending' : 'overdue' %>"><%= request.status === 'approved' ? 'Approved' : request.status === 'rejected' ? 'Rejected' : 'Pending' %></span>
+              </summary>
+
+              <div class="trial-accordion-body">
+                <div class="trial-request-grid">
+                  <div><strong>Contact:</strong> <%= request.contact_phone %></div>
+                  <div><strong>Email:</strong> <%= request.email %></div>
+                  <div><strong>WhatsApp:</strong> <%= request.whatsapp_number %></div>
+                  <div><strong>Student Requirement:</strong> <%= request.student_requirement %></div>
+                  <div><strong>Submitted:</strong> <%= request.created_at %></div>
+                  <div>
+                    <strong>Logo:</strong>
+                    <% if (request.logo_url) { %>
+                      <a href="<%= request.logo_url %>" target="_blank" rel="noopener">Open Logo</a>
+                    <% } else { %>
+                      -
+                    <% } %>
+                  </div>
+                </div>
+
+                <% if (request.owner_notes) { %>
+                  <p class="muted"><strong>Owner Note:</strong> <%= request.owner_notes %></p>
+                <% } %>
+
+                <form method="post" action="/owner/trial-requests/<%= request.id %>/review" class="trial-request-actions">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <label>Owner Note (optional)</label>
+                  <textarea name="ownerNotes" rows="3" placeholder="Internal note or reminder before you manually share login details."><%= request.owner_notes || '' %></textarea>
+                  <div class="trial-request-buttons">
+                    <button type="submit" name="status" value="approved" class="btn">Approve Request</button>
+                    <button type="submit" name="status" value="rejected" class="btn danger">Reject Request</button>
+                  </div>
+                </form>
+              </div>
+            </details>
+          <% }) %>
+        </div>
+      </section>
+    <% } %>
+  </div>
+</body>
+</html>
