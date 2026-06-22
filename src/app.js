@@ -5437,7 +5437,6 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = tp.branch_id
      LEFT JOIN users uploader ON uploader.id = tp.uploaded_by AND uploader.branch_id = tp.branch_id
 	     WHERE tp.coaching_id = ? AND tp.branch_id = ?
-	       AND ${getRealPaperFileCondition('tp')}
 	       AND tp.upload_date >= ?
        AND tp.upload_date < ?
      ORDER BY tp.upload_date DESC
@@ -5560,6 +5559,12 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const answerRequestSummaries = needsAnswerRequests
     ? await buildAnswerRequestSummaries(coachingId, branchId, answerRequests)
     : [];
+  papers.forEach((paper) => {
+    paper.is_downloadable_paper = (
+      (paper.storage_type === 's3' && Boolean(paper.public_url))
+      || (paper.storage_type === 'local' && Boolean(paper.storage_key))
+    );
+  });
 
   const paperStatsByStudent = new Map();
   paperStats.forEach((row) => paperStatsByStudent.set(row.student_id, row));
