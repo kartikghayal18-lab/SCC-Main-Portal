@@ -1757,13 +1757,25 @@ function normalizeBatchName(value) {
     .replace(/\s+/g, ' ');
 }
 
+function normalizeStudentStandard(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { ok: true, value: null };
+
+  const compact = raw.toLowerCase().replace(/\s+/g, '');
+  if (/^(class)?11(th)?$/.test(compact)) return { ok: true, value: '11th' };
+  if (/^(class)?12(th)?$/.test(compact)) return { ok: true, value: '12th' };
+
+  return { ok: false, value: null };
+}
+
 function extractBatchMeta(batchName) {
   const input = String(batchName || '').trim();
-  const standardMatch = input.match(/\b(11th|12th)\b/i);
+  const standardMatch = input.match(/\b(class\s*)?(11|12)\s*(th)?\b/i);
   const courseMatch = input.match(/\b(jee|neet)\b/i);
+  const normalizedStandard = normalizeStudentStandard(standardMatch ? standardMatch[0] : null);
 
   return {
-    standard: standardMatch ? standardMatch[1].replace(/^./, (char) => char.toUpperCase()) : null,
+    standard: normalizedStandard.ok ? normalizedStandard.value : null,
     course: courseMatch ? courseMatch[1].toUpperCase() : null,
   };
 }
@@ -5933,6 +5945,11 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=students');
   }
+  const normalizedBatchStandard = normalizeStudentStandard(batch.standard);
+  if (!normalizedBatchStandard.ok) {
+    req.session.flash = { type: 'error', text: 'Selected batch has an invalid standard. Use 11th or 12th.' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
 
   const existing = await get(
     `SELECT id FROM users WHERE coaching_id = ? AND branch_id = ? AND roll_no = ? LIMIT 1`,
@@ -5970,7 +5987,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
         rollNo,
         name,
         batch.id,
-        batch.standard || null,
+        normalizedBatchStandard.value,
         batch.course || null,
         contactPhone || null,
         guardianPhone || null,
@@ -6065,6 +6082,11 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
     req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=students');
   }
+  const normalizedBatchStandard = normalizeStudentStandard(batch.standard);
+  if (!normalizedBatchStandard.ok) {
+    req.session.flash = { type: 'error', text: 'Selected batch has an invalid standard. Use 11th or 12th.' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
 
   const rows = csv
     .split(/\r?\n/)
@@ -6122,7 +6144,7 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
           rollNo,
           name,
           batch.id,
-          batch.standard || null,
+          normalizedBatchStandard.value,
           batch.course || null,
           whatsappNumber || null,
           parentWhatsappNumber || null,
