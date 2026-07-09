@@ -1392,6 +1392,82 @@ async function sendFeeReminderByFeeId({ coachingId, branchId, feeId }) {
   });
 }
 
+async function saveAdminFeeRecord({
+  coachingId,
+  branchId,
+  studentId,
+  amount,
+  dueDate = null,
+  paymentDate = null,
+  status,
+  notes = '',
+  paymentMode = '',
+  addedBy,
+}) {
+  console.log(`[FEE SAVE START] studentId=${studentId} branchId=${branchId} coachingId=${coachingId} amount=${amount} status=${status}`);
+  try {
+    const feeResult = await run(
+      `INSERT INTO fees (coaching_id, branch_id, student_id, amount, due_date, payment_date, status, notes, payment_mode, added_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        coachingId,
+        branchId,
+        studentId,
+        amount,
+        dueDate || null,
+        paymentDate || null,
+        status,
+        notes || null,
+        paymentMode || null,
+        addedBy,
+      ]
+    );
+    console.log(`[FEE SAVE OK] feeId=${feeResult.lastID}`);
+    return feeResult.lastID;
+  } catch (error) {
+    console.error(`[FEE SAVE ERROR] error=${error.message}`);
+    throw error;
+  }
+}
+
+function logFeeWhatsAppFailure({ feeId, phone, errorCode = null, message = '' }) {
+  console.error(`[FEE WHATSAPP FAILED] feeId=${feeId} errorCode=${errorCode || ''} message=${message || ''}`);
+  if (String(errorCode || '') === '131047' || String(message || '').includes('131047')) {
+    console.error(`[WHATSAPP TEMPLATE REQUIRED] feeId=${feeId} phone=${phone || ''}`);
+  }
+}
+
+function queueFeeWhatsAppAfterSave({ coachingId, branchId, feeId, student }) {
+  const phone = student.parent_whatsapp_number || student.guardian_phone;
+  console.log(`[FEE WHATSAPP START] feeId=${feeId} studentId=${student.id} phone=${phone || ''}`);
+  if (!phone) {
+    console.error(`[FEE WHATSAPP FAILED] feeId=${feeId} errorCode= message=parent phone missing`);
+    return;
+  }
+
+  setImmediate(() => {
+    sendFeeReminderByFeeId({ coachingId, branchId, feeId })
+      .then((result) => {
+        if (result?.failed || result?.ok === false) {
+          logFeeWhatsAppFailure({
+            feeId,
+            phone,
+            errorCode: result.errorCode || result.code || null,
+            message: result.error || result.reason || 'Fee WhatsApp notification failed',
+          });
+        }
+      })
+      .catch((error) => {
+        logFeeWhatsAppFailure({
+          feeId,
+          phone,
+          errorCode: error.code || error.errorCode || null,
+          message: error.message,
+        });
+      });
+  });
+}
+
 async function sendScheduledFeeReminders({ coachingId = null, branchId = null } = {}) {
   const params = [];
   let sql = `
@@ -1961,23 +2037,23 @@ async function getFeeReportRows(coachingId, branchId, options = {}) {
   `;
   const feesParams = [coachingId, branchId];
   if (feesDate) {
-    feesSql += ` AND (f.payment_date = ? OR f.due_date = ?) `;
-    feesParams.push(feesDate, feesDate);
+    feesSql += ` AND COALESCE(f.payment_date, f.due_date, CAST(f.created_at AS DATE)) = ? `;
+    feesParams.push(feesDate);
   } else if (feesMonth) {
     const range = getMonthDateRange(feesMonth);
     if (range) {
       feesSql += `
-         AND (
-           (f.payment_date >= ? AND f.payment_date < ?)
-           OR (f.due_date >= ? AND f.due_date < ?)
-         )
+         AND COALESCE(f.payment_date, f.due_date, CAST(f.created_at AS DATE)) >= ?
+         AND COALESCE(f.payment_date, f.due_date, CAST(f.created_at AS DATE)) < ?
       `;
-      feesParams.push(range.start, range.end, range.start, range.end);
+      feesParams.push(range.start, range.end);
     }
   }
   feesSql += ` ORDER BY f.created_at DESC LIMIT ? `;
   feesParams.push(limit);
-  return all(feesSql, feesParams);
+  const rows = await all(feesSql, feesParams);
+  console.log(`[FEE LIST] branchId=${branchId} coachingId=${coachingId} month=${feesMonth || ''} rows=${rows.length}`);
+  return rows;
 }
 
 async function ensurePerformanceIndexes() {
@@ -5550,7 +5626,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const attendanceMonthFilter = normalizeMonthOnlyFilter(req.query.attendanceMonth, currentMonth);
   const papersMonthFilter = normalizeMonthOnlyFilter(req.query.papersMonth, currentMonth);
   const feesDateFilter = normalizeDateOnlyFilter(req.query.feesDate);
-  const feesMonthFilter = normalizeMonthOnlyFilter(req.query.feesMonth, currentMonth);
+  const feesMonthFilter = normalizeMonthOnlyFilter(req.query.feesMonth);
   const studentSearchQuery = (req.query.studentSearch || '').trim();
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
@@ -6603,6 +6679,74 @@ app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) =>
     details: { contactPhone, guardianPhone, whatsappNumber, parentWhatsappNumber },
   });
   req.session.flash = { type: 'success', text: 'Student details updated.' };
+  return res.redirect(`/admin/students/${studentId}/overview`);
+});
+
+app.post('/admin/students/:id/fees', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const studentId = Number.parseInt(String(req.params.id || '').trim(), 10);
+  console.log('[STUDENT FEE FORM] payload=', req.body, `studentId=${studentId}`);
+
+  const student = await get(
+    `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+     FROM users
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'
+     LIMIT 1`,
+    [studentId, coachingId, branchId]
+  );
+  if (!student) {
+    req.session.flash = { type: 'error', text: 'Student not found' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const amount = Number(req.body.amount);
+  const status = String(req.body.status || 'pending').trim().toLowerCase();
+  const dueDate = String(req.body.dueDate || '').trim() || null;
+  const paymentDate = String(req.body.paymentDate || '').trim() || null;
+  const paymentMode = String(req.body.paymentMode || '').trim();
+  const notes = String(req.body.notes || '').trim();
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    req.session.flash = { type: 'error', text: 'Enter a valid fee amount before saving payment details.' };
+    return res.redirect(`/admin/students/${studentId}/overview`);
+  }
+  if (!['pending', 'paid', 'overdue'].includes(status)) {
+    req.session.flash = { type: 'error', text: 'Select a valid fee status.' };
+    return res.redirect(`/admin/students/${studentId}/overview`);
+  }
+
+  try {
+    const feeId = await saveAdminFeeRecord({
+      coachingId,
+      branchId,
+      studentId,
+      amount,
+      dueDate,
+      paymentDate,
+      status,
+      notes,
+      paymentMode,
+      addedBy: req.session.user.id,
+    });
+
+    if (status === 'paid') {
+      await applyStudentPayment({ coachingId, branchId, studentId, amount });
+    } else if (status === 'pending' || status === 'overdue') {
+      await setStudentTotalFee({ coachingId, branchId, studentId, totalFee: amount });
+    }
+
+    queueFeeWhatsAppAfterSave({ coachingId, branchId, feeId, student });
+    await auditActor(req, 'student_fee_saved_from_overview', {
+      targetType: 'student',
+      targetId: studentId,
+      details: { rollNo: student.roll_no, amount, status, dueDate, paymentDate },
+    });
+    req.session.flash = { type: 'success', text: 'Fee record saved.' };
+  } catch (error) {
+    req.session.flash = { type: 'error', text: `Fee save failed: ${error.message}` };
+  }
+
   return res.redirect(`/admin/students/${studentId}/overview`);
 });
 
@@ -8119,14 +8263,22 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=fees');
   }
 
-  const feeResult = await run(
-    `INSERT INTO fees (coaching_id, branch_id, student_id, amount, due_date, payment_date, status, notes, payment_mode, added_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [coachingId, branchId, student.id, amount, dueDate, paymentDate, status, notes, paymentMode || null, req.session.user.id]
-  );
+  console.log(`[FEE ADD] studentId=${student.id} branchId=${branchId} coachingId=${coachingId} amount=${amount} status=${status}`);
+  const feeId = await saveAdminFeeRecord({
+    coachingId,
+    branchId,
+    studentId: student.id,
+    amount,
+    dueDate,
+    paymentDate,
+    status,
+    notes,
+    paymentMode,
+    addedBy: req.session.user.id,
+  });
 
   const fee = {
-    id: feeResult.lastID,
+    id: feeId,
     amount,
     due_date: dueDate,
     payment_date: paymentDate,

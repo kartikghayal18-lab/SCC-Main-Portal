@@ -131,6 +131,16 @@
             <td><%= feeSummary.pendingAmount.toFixed(2) %></td>
           </tr>
         </table>
+        <form method="post" action="/admin/students/<%= student.id %>/fees" class="grid two" style="margin-top: 16px;">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <label>Amount <input type="number" name="amount" step="0.01" min="0" required /></label>
+          <label>Status <select name="status" required><option value="pending">Pending</option><option value="paid">Paid</option><option value="overdue">Overdue</option></select></label>
+          <label>Next Due Date <input type="date" name="dueDate" /></label>
+          <label>Payment Date <input type="date" name="paymentDate" /></label>
+          <label>Payment Mode <select name="paymentMode"><option value="">Not specified</option><option value="Cash">Cash</option><option value="UPI">UPI</option><option value="Bank Transfer">Bank Transfer</option><option value="Card">Card</option><option value="Cheque">Cheque</option></select></label>
+          <label>Notes <input type="text" name="notes" /></label>
+          <div class="inline-actions"><button type="submit" class="btn compact">Save Fee</button></div>
+        </form>
       </div>
     </section>
 
