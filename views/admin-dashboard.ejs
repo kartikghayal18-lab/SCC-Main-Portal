@@ -785,9 +785,11 @@
             <% const paidFeesCount = fees.filter((item) => item.status === 'paid').length; %>
             <% const overdueFeesCount = fees.filter((item) => item.status === 'overdue').length; %>
             <section class="ops2-metrics-grid ops2-metrics-grid--compact">
-              <article class="ops2-metric-card ops2-metric-card--success"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">₹</span><span class="ops2-metric-card__trend">This month</span></div><strong>₹<%= feesPaidThisMonthAmount.toFixed(0) %></strong><span class="ops2-metric-card__label">Collected</span><small><%= feesPaidThisMonth.length %> payments</small><div class="ops2-sparkbars"><span style="height:52%"></span><span style="height:71%"></span><span style="height:49%"></span><span style="height:83%"></span><span style="height:66%"></span></div></article>
-              <article class="ops2-metric-card ops2-metric-card--warning"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">!</span><span class="ops2-metric-card__trend">Action</span></div><strong><%= pendingFeesCount %></strong><span class="ops2-metric-card__label">Pending</span><small>Follow-up needed</small><div class="ops2-sparkbars"><span style="height:31%"></span><span style="height:54%"></span><span style="height:44%"></span><span style="height:63%"></span><span style="height:35%"></span></div></article>
-              <article class="ops2-metric-card ops2-metric-card--danger"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">•</span><span class="ops2-metric-card__trend">Risk</span></div><strong><%= overdueFeesCount %></strong><span class="ops2-metric-card__label">Overdue</span><small>Immediate recovery</small><div class="ops2-sparkbars"><span style="height:22%"></span><span style="height:31%"></span><span style="height:47%"></span><span style="height:58%"></span><span style="height:41%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--neutral"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">₹</span><span class="ops2-metric-card__trend">Assigned</span></div><strong><%= financeSummary?.formatted?.totalFees || '₹0' %></strong><span class="ops2-metric-card__label">Total Fees</span><small>Active students</small><div class="ops2-sparkbars"><span style="height:44%"></span><span style="height:66%"></span><span style="height:58%"></span><span style="height:72%"></span><span style="height:64%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--success"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">₹</span><span class="ops2-metric-card__trend">Overall</span></div><strong><%= financeSummary?.formatted?.totalCollected || '₹0' %></strong><span class="ops2-metric-card__label">Total Collected</span><small>Paid records only</small><div class="ops2-sparkbars"><span style="height:52%"></span><span style="height:71%"></span><span style="height:49%"></span><span style="height:83%"></span><span style="height:66%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--warning"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">!</span><span class="ops2-metric-card__trend">Remaining</span></div><strong><%= financeSummary?.formatted?.totalPending || '₹0' %></strong><span class="ops2-metric-card__label">Total Pending</span><small>Total fees minus collected</small><div class="ops2-sparkbars"><span style="height:31%"></span><span style="height:54%"></span><span style="height:44%"></span><span style="height:63%"></span><span style="height:35%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--danger"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">-</span><span class="ops2-metric-card__trend"><%= expenseMonthFilter %></span></div><strong><%= financeSummary?.formatted?.totalExpenses || '₹0' %></strong><span class="ops2-metric-card__label">Monthly Expenses</span><small>Selected month</small><div class="ops2-sparkbars"><span style="height:22%"></span><span style="height:31%"></span><span style="height:47%"></span><span style="height:58%"></span><span style="height:41%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--primary"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">=</span><span class="ops2-metric-card__trend">Net</span></div><strong><%= financeSummary?.formatted?.netBalance || '₹0' %></strong><span class="ops2-metric-card__label">Net Balance</span><small>Collected minus expenses</small><div class="ops2-sparkbars"><span style="height:38%"></span><span style="height:59%"></span><span style="height:68%"></span><span style="height:73%"></span><span style="height:62%"></span></div></article>
             </section>
 
             <section class="ops2-split-grid">
@@ -850,9 +852,65 @@
                             <a class="ops2-inline-link" href="/admin/fees/<%= f.id %>/receipt?disposition=attachment">PDF</a>
                           <% } %>
                           <% if (!f.due_date && f.status !== 'paid') { %><span class="muted">-</span><% } %>
+                          <form method="post" action="/admin/fees/<%= f.id %>/delete" class="inline-delete-form" onsubmit="if (!confirm('Delete this specific fee record? This cannot be undone.')) return false; this.querySelector('button').disabled = true; return true;">
+                            <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                            <input type="hidden" name="redirectTo" value="/admin/dashboard?section=fees" />
+                            <button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button>
+                          </form>
                         </td>
                       </tr>
                     <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Monthly Expenses</p><h3>Expense tracking</h3></div><span class="ops2-chip"><strong><%= financeSummary?.formatted?.totalExpenses || '₹0' %></strong> this month</span></div>
+              <section class="ops2-split-grid">
+                <form method="post" action="/admin/expenses" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Expense Date</label><input type="date" name="expenseDate" required /></div>
+                  <div class="ops2-field"><label>Amount</label><input type="number" name="amount" step="0.01" min="0.01" required /></div>
+                  <div class="ops2-field"><label>Category</label><select name="category" required><option value="">Select category</option><% expenseCategories.forEach((category) => { %><option value="<%= category %>"><%= category %></option><% }) %></select></div>
+                  <div class="ops2-field"><label>Paid To / Vendor</label><input type="text" name="paidTo" maxlength="160" /></div>
+                  <div class="ops2-field"><label>Payment Mode</label><input type="text" name="paymentMode" maxlength="80" /></div>
+                  <div class="ops2-field"><label>Receipt / Reference No.</label><input type="text" name="referenceNo" maxlength="160" /></div>
+                  <div class="ops2-field full"><label>Description / Purpose</label><input type="text" name="description" maxlength="500" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Expense</button></div>
+                </form>
+                <form method="get" action="/admin/dashboard" class="ops2-form-grid ops2-form-grid--tight">
+                  <input type="hidden" name="section" value="fees" />
+                  <div class="ops2-field"><label>Expense Month</label><input type="month" name="expenseMonth" value="<%= expenseMonthFilter %>" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply</button></div>
+                  <div class="ops2-chip-row full"><span class="ops2-chip"><strong><%= expenses.length %></strong> records</span><a href="/admin/dashboard?section=fees" class="ops2-inline-link">Current month</a></div>
+                </form>
+              </section>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Date</th><th>Category</th><th>Paid To</th><th>Description</th><th>Amount</th><th>Payment Mode</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    <% expenses.forEach((expense) => { %>
+                      <tr>
+                        <td><%= formatDashboardDate(expense.expense_date) %></td>
+                        <td><%= expense.category %></td>
+                        <td><%= expense.paid_to || '-' %></td>
+                        <td><%= expense.description || expense.reference_no || '-' %></td>
+                        <td><%= formatIndianCurrency(expense.amount) %></td>
+                        <td><%= expense.payment_mode || '-' %></td>
+                        <td>
+                          <form method="post" action="/admin/expenses/<%= expense.id %>/delete" class="inline-delete-form" onsubmit="if (!confirm('Delete this specific expense record? This cannot be undone.')) return false; this.querySelector('button').disabled = true; return true;">
+                            <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                            <input type="hidden" name="redirectTo" value="/admin/dashboard?section=fees&expenseMonth=<%= expenseMonthFilter %>" />
+                            <button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button>
+                          </form>
+                        </td>
+                      </tr>
+                    <% }) %>
+                    <% if (!expenses.length) { %>
+                      <tr><td colspan="7" class="muted">No expenses recorded for this month.</td></tr>
+                    <% } %>
                   </tbody>
                 </table>
               </div>

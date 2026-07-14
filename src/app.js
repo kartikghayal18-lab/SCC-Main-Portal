@@ -20,6 +20,7 @@ const {
   getRecentWhatsAppLogs,
   updateWhatsAppLogStatus,
   sendDocumentMessage,
+  sendTemplateMessage,
   sendTextMessage,
 } = require('./services/whatsapp');
 const {
@@ -1077,6 +1078,88 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
   };
 }
 
+
+function getWhatsAppErrorCode(resultOrError) {
+  return String(
+    resultOrError?.errorCode
+    || resultOrError?.code
+    || resultOrError?.response?.error?.code
+    || resultOrError?.response?.error?.error_subcode
+    || ''
+  );
+}
+
+function isReEngagementError(resultOrError) {
+  const code = getWhatsAppErrorCode(resultOrError);
+  const message = String(resultOrError?.error || resultOrError?.message || resultOrError?.reason || '').toLowerCase();
+  return code === '131047' || message.includes('131047') || message.includes('re-engagement');
+}
+
+function buildPaperTemplateComponents({ recipientName, student, paper, paperUrl }) {
+  return [{
+    type: 'body',
+    parameters: [
+      { type: 'text', text: recipientName || student.name || student.roll_no || 'Parent' },
+      { type: 'text', text: student.name || student.roll_no || 'Student' },
+      { type: 'text', text: paper.test_label || paper.original_name || 'Test Paper' },
+      { type: 'text', text: String(paper.marks_obtained ?? '-') },
+      { type: 'text', text: String(paper.max_marks ?? '-') },
+      { type: 'text', text: paperUrl },
+    ],
+  }];
+}
+
+async function sendPaperTemplateFallback({ coachingId, branchId, student, recipient, document, paperId }) {
+  const templateName = String(process.env.WHATSAPP_PAPER_TEMPLATE_NAME || 'paper_result_notification').trim();
+  const languageCode = String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en').trim();
+  if (!templateName) {
+    console.error('[WHATSAPP TEMPLATE REQUIRED]', { paperId, studentId: student.id, recipient: recipient.key, reason: 'missing template name' });
+    return { ok: false, failed: true, error: 'WhatsApp paper template name is missing' };
+  }
+
+  console.log('[PAPER WHATSAPP TEMPLATE START]', {
+    paperId,
+    studentId: student.id,
+    recipient: recipient.key,
+    templateName,
+    languageCode,
+  });
+
+  const result = await sendTemplateMessage({
+    coachingId,
+    branchId,
+    studentId: student.id,
+    to: recipient.phone,
+    templateName,
+    languageCode,
+    components: buildPaperTemplateComponents({
+      recipientName: recipient.key === 'parent' ? student.parent_name || student.name || 'Parent' : student.name,
+      student,
+      paper: document.paper,
+      paperUrl: document.fileUrl,
+    }),
+  });
+
+  if (result?.failed || result?.ok === false) {
+    console.error('[PAPER WHATSAPP TEMPLATE FAILED]', {
+      paperId,
+      studentId: student.id,
+      recipient: recipient.key,
+      error: result.error || result.reason || 'Template send failed',
+    });
+    console.error('[WHATSAPP TEMPLATE REQUIRED]', { paperId, studentId: student.id, recipient: recipient.key });
+    return result;
+  }
+
+  console.log('[PAPER WHATSAPP TEMPLATE SENT]', {
+    paperId,
+    studentId: student.id,
+    recipient: recipient.key,
+    metaMessageId: result?.metaMessageId || null,
+  });
+  return result;
+}
+
 async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
   try {
     console.log('[WHATSAPP PAPER] upload hook start', {
@@ -1136,10 +1219,17 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
     ));
 
     for (const recipient of recipients) {
+      const coachingId = document.paper.coaching_id || student.coaching_id || req.session?.user?.coachingId || null;
+      const branchId = paperStudent.branch_id || student.branch_id || getCurrentBranchId(req);
       try {
+        console.log('[PAPER WHATSAPP NORMAL START]', {
+          recipient: recipient.key,
+          studentId: paperStudent.id,
+          paperId,
+        });
         const result = await sendDocumentMessage({
-          coachingId: document.paper.coaching_id || student.coaching_id || req.session?.user?.coachingId || null,
-          branchId: paperStudent.branch_id || student.branch_id || getCurrentBranchId(req),
+          coachingId,
+          branchId,
           studentId: paperStudent.id,
           to: recipient.phone,
           documentUrl: document.fileUrl,
@@ -1147,6 +1237,23 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
           caption: compactCaption,
         });
         if (result?.failed || result?.ok === false) {
+          if (isReEngagementError(result)) {
+            console.error('[PAPER WHATSAPP 131047]', {
+              recipient: recipient.key,
+              studentId: paperStudent.id,
+              paperId,
+              error: result.error || 'Re-engagement message',
+            });
+            await sendPaperTemplateFallback({
+              coachingId,
+              branchId,
+              student: paperStudent,
+              recipient,
+              document,
+              paperId,
+            });
+            continue;
+          }
           console.error('[WHATSAPP PAPER] failed', {
             recipient: recipient.key,
             studentId: paperStudent.id,
@@ -1155,19 +1262,36 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
           });
           continue;
         }
-        console.log(`[WHATSAPP PAPER] sent ${recipient.key}`, {
+        console.log('[PAPER WHATSAPP NORMAL SENT]', {
           recipient: recipient.key,
           studentId: paperStudent.id,
           paperId,
           metaMessageId: result?.metaMessageId || null,
         });
       } catch (error) {
-        console.error('[WHATSAPP PAPER] failed', {
-          recipient: recipient.key,
-          studentId: paperStudent.id,
-          paperId,
-          error: error.message,
-        });
+        if (isReEngagementError(error)) {
+          console.error('[PAPER WHATSAPP 131047]', {
+            recipient: recipient.key,
+            studentId: paperStudent.id,
+            paperId,
+            error: error.message,
+          });
+          await sendPaperTemplateFallback({
+            coachingId,
+            branchId,
+            student: paperStudent,
+            recipient,
+            document,
+            paperId,
+          });
+        } else {
+          console.error('[WHATSAPP PAPER] failed', {
+            recipient: recipient.key,
+            studentId: paperStudent.id,
+            paperId,
+            error: error.message,
+          });
+        }
       }
 
       if (isResult) {
@@ -2056,6 +2180,117 @@ async function getFeeReportRows(coachingId, branchId, options = {}) {
   return rows;
 }
 
+const EXPENSE_CATEGORIES = [
+  'Salary',
+  'Rent',
+  'Electricity',
+  'Internet',
+  'Marketing',
+  'Stationery',
+  'Maintenance',
+  'Transport',
+  'Software',
+  'Miscellaneous',
+];
+
+function sanitizeFinanceText(value, maxLength = 180) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
+}
+
+function formatIndianCurrency(value) {
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 2,
+  }).format(Number(value || 0));
+}
+
+async function ensureExpensesSchema() {
+  await run(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      coaching_id INTEGER NOT NULL,
+      branch_id INTEGER NOT NULL,
+      expense_date DATE NOT NULL,
+      amount NUMERIC(12, 2) NOT NULL,
+      category VARCHAR(80) NOT NULL,
+      paid_to VARCHAR(160),
+      payment_mode VARCHAR(80),
+      description TEXT,
+      reference_no VARCHAR(160),
+      created_by INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+async function getExpenseRows(coachingId, branchId, monthValue, limit = 150) {
+  const params = [coachingId, branchId];
+  let sql = `
+    SELECT id, CAST(expense_date AS TEXT) AS expense_date, amount, category, paid_to, payment_mode, description, reference_no
+    FROM expenses
+    WHERE coaching_id = ? AND branch_id = ?
+  `;
+  const range = getMonthDateRange(monthValue);
+  if (range) {
+    sql += ` AND expense_date >= ? AND expense_date < ? `;
+    params.push(range.start, range.end);
+  }
+  sql += ` ORDER BY expense_date DESC, id DESC LIMIT ? `;
+  params.push(limit);
+  return all(sql, params);
+}
+
+async function getFinanceSummary(coachingId, branchId, expenseMonth) {
+  const feeRow = await get(`
+    SELECT COALESCE(SUM(COALESCE(sfs.total_fee, 0)), 0) AS total_fees
+    FROM users u
+    LEFT JOIN student_fee_structure sfs
+      ON sfs.student_id = u.id
+     AND sfs.coaching_id = u.coaching_id
+     AND sfs.branch_id = u.branch_id
+    WHERE u.coaching_id = ? AND u.branch_id = ? AND u.role = 'student'
+  `, [coachingId, branchId]);
+  const collectedRow = await get(`
+    SELECT COALESCE(SUM(amount), 0) AS total_collected
+    FROM fees
+    WHERE coaching_id = ? AND branch_id = ? AND status = 'paid'
+  `, [coachingId, branchId]);
+  const range = getMonthDateRange(expenseMonth);
+  const expenseParams = [coachingId, branchId];
+  let expenseSql = `
+    SELECT COALESCE(SUM(amount), 0) AS total_expenses
+    FROM expenses
+    WHERE coaching_id = ? AND branch_id = ?
+  `;
+  if (range) {
+    expenseSql += ` AND expense_date >= ? AND expense_date < ?`;
+    expenseParams.push(range.start, range.end);
+  }
+  const expenseRow = await get(expenseSql, expenseParams);
+  const totalFees = Number(feeRow?.total_fees || 0);
+  const totalCollected = Number(collectedRow?.total_collected || 0);
+  const totalPending = Math.max(totalFees - totalCollected, 0);
+  const totalExpenses = Number(expenseRow?.total_expenses || 0);
+  const netBalance = totalCollected - totalExpenses;
+  console.log(`[FINANCE SUMMARY] coachingId=${coachingId} branchId=${branchId} totalFees=${totalFees} collected=${totalCollected} pending=${totalPending} expenses=${totalExpenses} net=${netBalance}`);
+  return {
+    totalFees,
+    totalCollected,
+    totalPending,
+    totalExpenses,
+    netBalance,
+    formatted: {
+      totalFees: formatIndianCurrency(totalFees),
+      totalCollected: formatIndianCurrency(totalCollected),
+      totalPending: formatIndianCurrency(totalPending),
+      totalExpenses: formatIndianCurrency(totalExpenses),
+      netBalance: formatIndianCurrency(netBalance),
+    },
+  };
+}
+
 async function ensurePerformanceIndexes() {
   const indexes = [
     `CREATE INDEX IF NOT EXISTS users_coaching_role_idx ON users (coaching_id, role)`,
@@ -2066,6 +2301,8 @@ async function ensurePerformanceIndexes() {
     `CREATE INDEX IF NOT EXISTS fees_coaching_created_idx ON fees (coaching_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS fees_coaching_payment_date_idx ON fees (coaching_id, payment_date DESC)`,
     `CREATE INDEX IF NOT EXISTS fees_coaching_due_date_idx ON fees (coaching_id, due_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS expenses_coaching_branch_date_idx ON expenses (coaching_id, branch_id, expense_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS expenses_coaching_branch_created_idx ON expenses (coaching_id, branch_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS test_papers_coaching_upload_idx ON test_papers (coaching_id, upload_date DESC)`,
     `CREATE INDEX IF NOT EXISTS test_papers_coaching_student_upload_idx ON test_papers (coaching_id, student_id, upload_date DESC)`,
     `CREATE INDEX IF NOT EXISTS test_papers_coaching_answer_request_idx ON test_papers (coaching_id, answer_request_id, upload_date DESC)`,
@@ -4989,6 +5226,69 @@ app.post('/admin/fees/:id/send-reminder', requireCoachingAdmin, async (req, res)
   return res.redirect('/admin/dashboard?section=fees');
 });
 
+app.post('/admin/fees/:id/delete', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const feeId = Number.parseInt(req.params.id, 10);
+  const redirectTo = String(req.body.redirectTo || '').startsWith('/')
+    ? String(req.body.redirectTo)
+    : '/admin/dashboard?section=fees';
+  console.log(`[FEE DELETE START] feeId=${feeId} branchId=${branchId} coachingId=${coachingId}`);
+
+  if (!Number.isInteger(feeId) || feeId <= 0) {
+    console.error(`[FEE DELETE DENIED] feeId=${req.params.id}`);
+    return res.status(403).send('Forbidden');
+  }
+
+  try {
+    const fee = await get(
+      `SELECT id, coaching_id, branch_id, student_id
+       FROM fees
+       WHERE id = ?
+       LIMIT 1`,
+      [feeId]
+    );
+
+    if (!fee || Number(fee.coaching_id) !== Number(coachingId) || Number(fee.branch_id) !== Number(branchId)) {
+      console.error(`[FEE DELETE DENIED] feeId=${feeId}`);
+      return res.status(403).send('Forbidden');
+    }
+
+    await withTransaction(async (tx) => {
+      await tx.run(
+        `DELETE FROM notification_logs
+         WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+           AND (
+             event_key LIKE ?
+             OR event_key LIKE ?
+             OR event_key LIKE ?
+           )`,
+        [
+          coachingId,
+          branchId,
+          fee.student_id,
+          `%:${feeId}`,
+          `%:${fee.student_id}:${feeId}`,
+          `%:${branchId}:${feeId}:%`,
+        ]
+      );
+      await tx.run(
+        `DELETE FROM fees
+         WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+        [feeId, coachingId, branchId]
+      );
+    });
+
+    console.log(`[FEE DELETE OK] feeId=${feeId}`);
+    req.session.flash = { type: 'success', text: 'Fee record deleted successfully.' };
+    return res.redirect(redirectTo);
+  } catch (error) {
+    console.error(`[FEE DELETE ERROR] feeId=${feeId} error=${error.message}`);
+    req.session.flash = { type: 'error', text: 'Fee record could not be deleted.' };
+    return res.redirect(redirectTo);
+  }
+});
+
 app.get('/admin/fees/:id/receipt', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
@@ -5627,6 +5927,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const papersMonthFilter = normalizeMonthOnlyFilter(req.query.papersMonth, currentMonth);
   const feesDateFilter = normalizeDateOnlyFilter(req.query.feesDate);
   const feesMonthFilter = normalizeMonthOnlyFilter(req.query.feesMonth);
+  const expenseMonthFilter = normalizeMonthOnlyFilter(req.query.expenseMonth, currentMonth);
   const studentSearchQuery = (req.query.studentSearch || '').trim();
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
@@ -5751,6 +6052,8 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     feesMonth: feesDateFilter ? '' : feesMonthFilter,
     limit: 150,
   }) : Promise.resolve([]);
+  const financeSummaryPromise = needsFees ? getFinanceSummary(coachingId, branchId, expenseMonthFilter) : Promise.resolve(null);
+  const expensesPromise = needsFees ? getExpenseRows(coachingId, branchId, expenseMonthFilter) : Promise.resolve([]);
 
   const notesPromise = needsNotes ? all(
     `SELECT bn.id, bn.batch_id, bn.standard, bn.course, bn.title, bn.resource_url, bn.description, bn.created_at,
@@ -5815,6 +6118,8 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     attendance,
     attendanceDates,
     fees,
+    financeSummary,
+    expenses,
     notes,
     answerRequests,
     paperStats,
@@ -5832,6 +6137,8 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     attendancePromise,
     attendanceDatesPromise,
     feesPromise,
+    financeSummaryPromise,
+    expensesPromise,
     notesPromise,
     answerRequestsPromise,
     paperStatsPromise,
@@ -5955,7 +6262,12 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     papersMonthFilter,
     feesDateFilter,
     feesMonthFilter,
+    expenseMonthFilter,
     fees,
+    financeSummary,
+    expenses,
+    expenseCategories: EXPENSE_CATEGORIES,
+    formatIndianCurrency,
     feesPaidThisMonth,
     notes,
     answerRequestSummaries,
@@ -8237,6 +8549,79 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   return res.redirect(`/admin/dashboard?section=attendance&attendanceDate=${encodeURIComponent(attendanceDate)}`);
 });
 
+
+app.post('/admin/expenses', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const amount = Number(req.body.amount);
+  const expenseDate = normalizeDateOnlyFilter(req.body.expenseDate);
+  const category = sanitizeFinanceText(req.body.category, 80);
+  const paidTo = sanitizeFinanceText(req.body.paidTo, 160);
+  const paymentMode = sanitizeFinanceText(req.body.paymentMode, 80);
+  const description = sanitizeFinanceText(req.body.description, 500);
+  const referenceNo = sanitizeFinanceText(req.body.referenceNo, 160);
+  const redirectMonth = expenseDate ? expenseDate.slice(0, 7) : getCurrentMonthValue();
+
+  console.log(`[EXPENSE ADD START] coachingId=${coachingId} branchId=${branchId} amount=${amount} category=${category}`);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    req.session.flash = { type: 'error', text: 'Expense amount must be greater than 0.' };
+    return res.redirect(`/admin/dashboard?section=fees&expenseMonth=${encodeURIComponent(redirectMonth)}`);
+  }
+  if (!expenseDate) {
+    req.session.flash = { type: 'error', text: 'Expense date is required.' };
+    return res.redirect('/admin/dashboard?section=fees');
+  }
+  if (!category) {
+    req.session.flash = { type: 'error', text: 'Expense category is required.' };
+    return res.redirect(`/admin/dashboard?section=fees&expenseMonth=${encodeURIComponent(redirectMonth)}`);
+  }
+
+  try {
+    const result = await run(
+      `INSERT INTO expenses (coaching_id, branch_id, expense_date, amount, category, paid_to, payment_mode, description, reference_no, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [coachingId, branchId, expenseDate, amount, category, paidTo || null, paymentMode || null, description || null, referenceNo || null, req.session.user.id]
+    );
+    console.log(`[EXPENSE ADD OK] expenseId=${result?.lastID || result?.id || ''} coachingId=${coachingId} branchId=${branchId}`);
+    req.session.flash = { type: 'success', text: 'Expense added successfully.' };
+    return res.redirect(`/admin/dashboard?section=fees&expenseMonth=${encodeURIComponent(redirectMonth)}`);
+  } catch (error) {
+    console.error('[EXPENSE ADD ERROR]', error);
+    req.session.flash = { type: 'error', text: 'Could not save expense. Please try again.' };
+    return res.redirect(`/admin/dashboard?section=fees&expenseMonth=${encodeURIComponent(redirectMonth)}`);
+  }
+});
+
+app.post('/admin/expenses/:id/delete', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const expenseId = Number(req.params.id);
+  const redirectTo = String(req.body.redirectTo || '/admin/dashboard?section=fees');
+  const safeRedirect = redirectTo.startsWith('/admin/dashboard') ? redirectTo : '/admin/dashboard?section=fees';
+
+  console.log(`[EXPENSE DELETE START] expenseId=${expenseId} branchId=${branchId} coachingId=${coachingId}`);
+  if (!Number.isInteger(expenseId) || expenseId <= 0) {
+    console.warn(`[EXPENSE DELETE DENIED] expenseId=${req.params.id} branchId=${branchId} coachingId=${coachingId}`);
+    return res.status(403).send('Forbidden');
+  }
+
+  try {
+    const expense = await get('SELECT id, coaching_id, branch_id FROM expenses WHERE id = ?', [expenseId]);
+    if (!expense || Number(expense.coaching_id) !== Number(coachingId) || Number(expense.branch_id) !== Number(branchId)) {
+      console.warn(`[EXPENSE DELETE DENIED] expenseId=${expenseId} branchId=${branchId} coachingId=${coachingId}`);
+      return res.status(403).send('Forbidden');
+    }
+    await run('DELETE FROM expenses WHERE id = ? AND coaching_id = ? AND branch_id = ?', [expenseId, coachingId, branchId]);
+    console.log(`[EXPENSE DELETE OK] expenseId=${expenseId}`);
+    req.session.flash = { type: 'success', text: 'Expense record deleted successfully.' };
+    return res.redirect(safeRedirect);
+  } catch (error) {
+    console.error(`[EXPENSE DELETE ERROR] expenseId=${expenseId} error=${error.message}`);
+    req.session.flash = { type: 'error', text: 'Could not delete expense record.' };
+    return res.redirect(safeRedirect);
+  }
+});
+
 app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
@@ -8881,6 +9266,7 @@ async function prepareApp() {
       .then(() => ensureNotificationSchema())
       .then(() => ensureOnboardingWhatsAppSchema())
       .then(() => ensureFeeStructureSchema())
+      .then(() => ensureExpensesSchema())
       .then(() => ensureOmrSchema())
       .then(() => ensurePerformanceIndexes())
       .then(async () => {
