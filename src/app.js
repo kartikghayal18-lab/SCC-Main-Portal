@@ -18,6 +18,7 @@ const {
   getWhatsAppSettings,
   saveWhatsAppSettings,
   getRecentWhatsAppLogs,
+  resendWhatsAppLog,
   updateWhatsAppLogStatus,
   sendDocumentMessage,
   sendTemplateMessage,
@@ -413,7 +414,7 @@ async function ensureOmrSchema() {
 const PORT = process.env.PORT || 3000;
 const SINGLE_CLIENT_COACHING_SLUG = String(process.env.CLIENT_COACHING_SLUG || 'scc').trim().toLowerCase();
 const SINGLE_CLIENT_NAME = 'SHIV CHHATRAPATI CLASSES';
-const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
+const OWNER_SECTIONS = new Set(['overview', 'finance', 'staff', 'permissions']);
 const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'notifications', 'settings']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
 const DEFAULT_UPLOAD_LIMIT_BYTES = isVercel ? 4 * 1024 * 1024 : 25 * 1024 * 1024;
@@ -1547,6 +1548,7 @@ async function saveAdminFeeRecord({
       ]
     );
     console.log(`[FEE SAVE OK] feeId=${feeResult.lastID}`);
+    console.log(`[FEE ENTRY CREATED] feeId=${feeResult.lastID} createdBy=${addedBy} branchId=${branchId}`);
     return feeResult.lastID;
   } catch (error) {
     console.error(`[FEE SAVE ERROR] error=${error.message}`);
@@ -1785,6 +1787,99 @@ function getTwoFactorIdentity(user, coaching = null) {
   };
 }
 
+const MERI_BRANCH_CODE = 'meri';
+const MERI_BRANCH_NAME = 'SCC - Meri Branch';
+const OWNER_PERMISSION_KEYS = [
+  'dashboard.view', 'students.view', 'students.create', 'students.edit', 'students.delete',
+  'attendance.view', 'attendance.manage', 'fees.entry', 'fees.view_own_entries', 'fees.view_all_entries',
+  'fees.view_totals', 'fees.edit', 'fees.delete', 'expenses.view', 'expenses.manage', 'papers.view',
+  'papers.upload', 'notes.view', 'notes.manage', 'whatsapp.view', 'whatsapp.send', 'notifications.view',
+  'settings.view', 'settings.manage',
+];
+const DEFAULT_STAFF_PERMISSIONS = new Set(['dashboard.view', 'students.view', 'fees.entry', 'fees.view_own_entries']);
+
+async function getMeriBranchRecord() {
+  return get(
+    `SELECT b.id, b.code, b.name, b.coaching_id, cc.name AS coaching_name
+     FROM branches b
+     JOIN coaching_classes cc ON cc.id = b.coaching_id
+     WHERE b.code = ? AND b.name = ? AND b.is_active = TRUE
+     LIMIT 1`,
+    [MERI_BRANCH_CODE, MERI_BRANCH_NAME]
+  );
+}
+
+async function ensureAdminPermissionSchema() {
+  await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT FALSE`);
+  await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS admin_permissions (
+      id SERIAL PRIMARY KEY,
+      coaching_id INTEGER NOT NULL,
+      branch_id INTEGER NOT NULL,
+      admin_user_id INTEGER NOT NULL,
+      permission_key VARCHAR(120) NOT NULL,
+      is_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+      granted_by INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (coaching_id, branch_id, admin_user_id, permission_key)
+    )
+  `);
+}
+
+async function getAdminPermissions(coachingId, branchId, adminUserId) {
+  const rows = await all(
+    `SELECT permission_key, is_allowed
+     FROM admin_permissions
+     WHERE coaching_id = ? AND branch_id = ? AND admin_user_id = ?`,
+    [coachingId, branchId, adminUserId]
+  );
+  const explicit = new Map(rows.map((row) => [row.permission_key, row.is_allowed === true || row.is_allowed === 1]));
+  const allowed = new Set();
+  OWNER_PERMISSION_KEYS.forEach((key) => {
+    if (explicit.has(key) ? explicit.get(key) : DEFAULT_STAFF_PERMISSIONS.has(key)) allowed.add(key);
+  });
+  return allowed;
+}
+
+async function userHasPermission(req, permissionKey) {
+  if (!req.session?.user || req.session.user.role !== 'admin' || req.session.user.isOwner) return false;
+  const allowed = await getAdminPermissions(req.session.user.coachingId, req.session.user.branchId, req.session.user.id);
+  const result = allowed.has(permissionKey);
+  console.log(`[PERMISSION CHECK] userId=${req.session.user.id} permission=${permissionKey} allowed=${result}`);
+  return result;
+}
+
+function accessDenied(res) {
+  return res.status(403).send('Access Denied');
+}
+
+function requirePermission(permissionKey) {
+  return async (req, res, next) => {
+    if (await userHasPermission(req, permissionKey)) return next();
+    return accessDenied(res);
+  };
+}
+
+async function requireBranchOwner(req, res, next) {
+  if (!req.session.user) return res.redirect('/owner/login');
+  const meriBranch = await getMeriBranchRecord();
+  const allowed = Boolean(
+    meriBranch
+    && req.session.user.isOwner
+    && Number(req.session.user.coachingId) === Number(meriBranch.coaching_id)
+    && Number(req.session.user.branchId) === Number(meriBranch.id)
+  );
+  if (!allowed) {
+    console.warn(`[OWNER ACCESS DENIED] userId=${req.session.user.id || ''} branchId=${req.session.user.branchId || ''}`);
+    return res.status(403).send('Forbidden');
+  }
+  req.ownerBranch = meriBranch;
+  console.log(`[OWNER ACCESS] ownerId=${req.session.user.id} branchId=${meriBranch.id}`);
+  return next();
+}
+
 async function createPendingTwoFactorLogin(req, user, coaching = null) {
   const identity = getTwoFactorIdentity(user, coaching);
   req.session.pendingLogin = {
@@ -1822,6 +1917,7 @@ async function getPendingTwoFactorContext(req) {
 }
 
 async function finishAuthenticatedLogin(req, res, user, coaching = null) {
+  await run(`UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`, [user.id]).catch(() => {});
   await signInUser(req, user, coaching);
 
   if (req.session.user.role === 'admin' && !hasAcceptedAdminLegal(user)) {
@@ -1852,9 +1948,7 @@ function requireAuth(req, res, next) {
 }
 
 function requireOwner(req, res, next) {
-  if (!req.session.user) return res.redirect('/owner/login');
-  if (!req.session.user.isOwner) return res.status(403).send('Forbidden');
-  return next();
+  return requireBranchOwner(req, res, next);
 }
 
 function requireCoachingAdmin(req, res, next) {
@@ -2148,6 +2242,7 @@ async function getFeeReportRows(coachingId, branchId, options = {}) {
   feesDate = '',
   feesMonth = '',
   limit = 150,
+  createdBy = null,
   } = options;
   let feesSql = `
     SELECT f.id, f.amount, CAST(f.due_date AS TEXT) AS due_date, CAST(f.payment_date AS TEXT) AS payment_date, f.status, f.notes,
@@ -2160,6 +2255,10 @@ async function getFeeReportRows(coachingId, branchId, options = {}) {
      WHERE f.coaching_id = ? AND f.branch_id = ?
   `;
   const feesParams = [coachingId, branchId];
+  if (createdBy) {
+    feesSql += ` AND f.added_by = ? `;
+    feesParams.push(createdBy);
+  }
   if (feesDate) {
     feesSql += ` AND COALESCE(f.payment_date, f.due_date, CAST(f.created_at AS DATE)) = ? `;
     feesParams.push(feesDate);
@@ -4055,7 +4154,7 @@ app.post('/owner/forgot-password', async (req, res) => {
     });
   }
 
-  const owner = await get(`SELECT * FROM users WHERE is_owner = 1 AND username = ? LIMIT 1`, [username]);
+  const owner = await get(`SELECT u.* FROM users u JOIN branches b ON b.id = u.branch_id AND b.coaching_id = u.coaching_id WHERE u.is_owner = 1 AND b.code = ? AND b.name = ? AND LOWER(u.username) = LOWER(?) LIMIT 1`, [MERI_BRANCH_CODE, MERI_BRANCH_NAME, username]);
   if (!owner) {
     return renderOwnerForgotPasswordPage(req, res, {
       type: 'error',
@@ -4279,7 +4378,7 @@ app.post('/login', async (req, res) => {
     return renderLoginPage(req, res, { type: 'error', text: 'Select a valid login type' });
   }
 
-  if (!user) {
+  if (!user || user.is_disabled) {
     return renderLoginPage(req, res, { type: 'error', text: 'Invalid credentials' });
   }
 
@@ -4383,11 +4482,16 @@ app.post('/owner/login', async (req, res) => {
   }
 
   const user = await get(
-    `SELECT * FROM users WHERE is_owner = 1 AND username = ? LIMIT 1`,
-    [username]
+    `SELECT u.*, b.code AS branch_code, b.name AS branch_name
+     FROM users u
+     JOIN branches b ON b.id = u.branch_id AND b.coaching_id = u.coaching_id
+     WHERE u.is_owner = 1 AND u.role IN ('owner', 'super_admin', 'admin')
+       AND b.code = ? AND b.name = ? AND LOWER(u.username) = LOWER(?)
+     LIMIT 1`,
+    [MERI_BRANCH_CODE, MERI_BRANCH_NAME, username]
   );
 
-  if (!user) {
+  if (!user || user.is_disabled) {
     return renderOwnerLoginPage(req, res, { type: 'error', text: 'Invalid owner credentials' });
   }
 
@@ -5201,6 +5305,39 @@ app.post('/admin/whatsapp/broadcast', requireCoachingAdmin, async (req, res) => 
   return res.redirect('/admin/dashboard?section=whatsapp');
 });
 
+
+app.post('/admin/whatsapp-logs/:id/resend', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const logId = Number(req.params.id);
+  console.log(`[WHATSAPP MANUAL RESEND START] logId=${logId} branchId=${branchId} coachingId=${coachingId}`);
+
+  try {
+    const result = await resendWhatsAppLog({
+      logId,
+      coachingId,
+      branchId,
+      resentBy: req.session.user.id,
+    });
+
+    if (result?.denied) {
+      console.warn(`[WHATSAPP MANUAL RESEND DENIED] logId=${logId}`);
+      return res.status(403).send('Forbidden');
+    }
+
+    if (result?.ok) {
+      req.session.flash = { type: 'success', text: 'Message resent successfully.' };
+    } else {
+      req.session.flash = { type: 'error', text: result?.message || 'Resend failed. Please check WhatsApp settings.' };
+    }
+  } catch (error) {
+    console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=${error?.code || error?.errorCode || ''}`, error);
+    req.session.flash = { type: 'error', text: `Resend failed: ${String(error.message || 'Unknown error').slice(0, 180)}` };
+  }
+
+  return res.redirect('/admin/dashboard?section=whatsapp');
+});
+
 app.post('/admin/fees/:id/send-reminder', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
@@ -5226,7 +5363,7 @@ app.post('/admin/fees/:id/send-reminder', requireCoachingAdmin, async (req, res)
   return res.redirect('/admin/dashboard?section=fees');
 });
 
-app.post('/admin/fees/:id/delete', requireCoachingAdmin, async (req, res) => {
+app.post('/admin/fees/:id/delete', requireCoachingAdmin, requirePermission('fees.delete'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const feeId = Number.parseInt(req.params.id, 10);
@@ -5424,6 +5561,68 @@ app.get('/admin/performance/slow-operations', requireCoachingAdmin, async (req, 
 
 app.get('/owner/dashboard', requireOwner, async (req, res) => {
   const activeSection = getOwnerSection(req.query.section);
+  const selectedBranch = req.ownerBranch || await getMeriBranchRecord();
+  const coachingId = selectedBranch.coaching_id;
+  const branchId = selectedBranch.id;
+  const currentMonth = getCurrentMonthValue();
+  const financeSummary = await getFinanceSummary(coachingId, branchId, currentMonth);
+  const totalStudents = await get(`SELECT COUNT(*) AS count FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`, [coachingId, branchId]);
+  const todayFees = await all(`SELECT f.id, f.amount, f.status, f.payment_mode, f.notes, f.created_at, u.name, u.roll_no, admin.name AS entered_by_name, admin.username AS entered_by_username
+    FROM fees f JOIN users u ON u.id = f.student_id AND u.branch_id = f.branch_id
+    LEFT JOIN users admin ON admin.id = f.added_by AND admin.branch_id = f.branch_id
+    WHERE f.coaching_id = ? AND f.branch_id = ? AND CAST(f.created_at AS DATE) = CURRENT_DATE
+    ORDER BY f.created_at DESC LIMIT 50`, [coachingId, branchId]);
+  const feeEntries = await all(`SELECT f.id, f.amount, f.status, f.payment_mode, f.notes, f.created_at, u.name, u.roll_no, admin.name AS entered_by_name, admin.username AS entered_by_username
+    FROM fees f JOIN users u ON u.id = f.student_id AND u.branch_id = f.branch_id
+    LEFT JOIN users admin ON admin.id = f.added_by AND admin.branch_id = f.branch_id
+    WHERE f.coaching_id = ? AND f.branch_id = ?
+    ORDER BY f.created_at DESC LIMIT 200`, [coachingId, branchId]);
+  const staff = await all(`SELECT id, username, name, email, contact_phone, role, is_owner, is_disabled, last_login_at
+    FROM users WHERE coaching_id = ? AND branch_id = ? AND role IN ('admin', 'owner', 'super_admin')
+    ORDER BY is_owner DESC, name, username`, [coachingId, branchId]);
+  const permissionRows = await all(`SELECT admin_user_id, permission_key, is_allowed FROM admin_permissions WHERE coaching_id = ? AND branch_id = ?`, [coachingId, branchId]);
+  const staffPermissions = {};
+  staff.forEach((admin) => {
+    const explicit = new Map(permissionRows.filter((row) => Number(row.admin_user_id) === Number(admin.id)).map((row) => [row.permission_key, row.is_allowed === true || row.is_allowed === 1]));
+    staffPermissions[admin.id] = OWNER_PERMISSION_KEYS.filter((key) => explicit.has(key) ? explicit.get(key) : DEFAULT_STAFF_PERMISSIONS.has(key));
+  });
+  const groupedByStaff = await all(`SELECT COALESCE(admin.name, admin.username, 'Unknown') AS staff_name, COUNT(*) AS entry_count, COALESCE(SUM(f.amount), 0) AS amount
+    FROM fees f LEFT JOIN users admin ON admin.id = f.added_by AND admin.branch_id = f.branch_id
+    WHERE f.coaching_id = ? AND f.branch_id = ?
+    GROUP BY admin.id, admin.name, admin.username ORDER BY amount DESC`, [coachingId, branchId]);
+  const pendingOverdue = await all(`SELECT f.id, f.amount, f.status, f.due_date, u.name, u.roll_no FROM fees f JOIN users u ON u.id = f.student_id AND u.branch_id = f.branch_id WHERE f.coaching_id = ? AND f.branch_id = ? AND f.status IN ('pending', 'overdue') ORDER BY f.created_at DESC LIMIT 50`, [coachingId, branchId]);
+
+  return renderWithMessage(res, 'owner-dashboard', {
+    user: req.session.user,
+    activeSection,
+    coachings: [],
+    trialRequests: [],
+    branches: [selectedBranch],
+    selectedBranch,
+    branchOwnerMode: true,
+    permissionKeys: OWNER_PERMISSION_KEYS,
+    staff,
+    staffPermissions,
+    financeSummary,
+    todayFees,
+    feeEntries,
+    groupedByStaff,
+    pendingOverdue,
+    stats: {
+      totalCoachings: 1,
+      activeCoachings: 1,
+      totalStudents: Number(totalStudents?.count || 0),
+      totalSeatCapacity: null,
+      expiringSoon: 0,
+      pendingTrialRequests: 0,
+    },
+    branding: buildBranding({ name: selectedBranch.coaching_name, brand_name: selectedBranch.name, slug: 'scc' }),
+    flash: req.session.flash,
+  });
+});
+
+app.get('/owner/platform-dashboard-disabled', requireOwner, async (req, res) => {
+  const activeSection = getOwnerSection(req.query.section);
   const planSql = buildResolvedPlanSql('cc');
   const requestedBranchId = Number.parseInt(String(req.query.branchId || req.session.ownerBranchId || ''), 10);
   const branches = await all(
@@ -5568,11 +5767,82 @@ app.get('/owner/dashboard', requireOwner, async (req, res) => {
   req.session.flash = null;
 });
 
+
+app.post('/owner/staff', requireOwner, async (req, res) => {
+  const branch = req.ownerBranch;
+  const username = String(req.body.username || '').trim();
+  const name = String(req.body.name || '').trim();
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const contactPhone = String(req.body.contactPhone || '').trim();
+  const password = String(req.body.password || '').trim();
+  if (!username || !name || !password) {
+    req.session.flash = { type: 'error', text: 'Staff username, name and password are required.' };
+    return res.redirect('/owner/dashboard?section=staff');
+  }
+  const passwordHash = await bcrypt.hash(password, 10);
+  const result = await run(
+    `INSERT INTO users (coaching_id, branch_id, role, is_owner, username, name, contact_phone, email, password_hash, must_change_password)
+     VALUES (?, ?, 'admin', 0, ?, ?, ?, ?, ?, 1)`,
+    [branch.coaching_id, branch.id, username, name, contactPhone || null, email || null, passwordHash]
+  );
+  console.log(`[STAFF CREATED] staffId=${result.lastID} ownerId=${req.session.user.id} branchId=${branch.id}`);
+  req.session.flash = { type: 'success', text: 'Staff account created.' };
+  return res.redirect('/owner/dashboard?section=staff');
+});
+
+app.post('/owner/staff/:id/update', requireOwner, async (req, res) => {
+  const branch = req.ownerBranch;
+  const staffId = Number(req.params.id);
+  const staff = await get(`SELECT id, is_owner FROM users WHERE id = ? AND coaching_id = ? AND branch_id = ? LIMIT 1`, [staffId, branch.coaching_id, branch.id]);
+  if (!staff || staff.is_owner) return res.status(403).send('Forbidden');
+  const name = String(req.body.name || '').trim();
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const contactPhone = String(req.body.contactPhone || '').trim();
+  const isDisabled = String(req.body.isDisabled || '') === '1';
+  await run(`UPDATE users SET name = ?, email = ?, contact_phone = ?, is_disabled = ? WHERE id = ? AND coaching_id = ? AND branch_id = ?`, [name, email || null, contactPhone || null, isDisabled, staffId, branch.coaching_id, branch.id]);
+  req.session.flash = { type: 'success', text: 'Staff account updated.' };
+  return res.redirect('/owner/dashboard?section=staff');
+});
+
+app.post('/owner/staff/:id/password', requireOwner, async (req, res) => {
+  const branch = req.ownerBranch;
+  const staffId = Number(req.params.id);
+  const password = String(req.body.password || '').trim();
+  const staff = await get(`SELECT id, is_owner FROM users WHERE id = ? AND coaching_id = ? AND branch_id = ? LIMIT 1`, [staffId, branch.coaching_id, branch.id]);
+  if (!staff || staff.is_owner || !password) return res.status(403).send('Forbidden');
+  const passwordHash = await bcrypt.hash(password, 10);
+  await run(`UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ? AND coaching_id = ? AND branch_id = ?`, [passwordHash, staffId, branch.coaching_id, branch.id]);
+  req.session.flash = { type: 'success', text: 'Staff password reset.' };
+  return res.redirect('/owner/dashboard?section=staff');
+});
+
+app.post('/owner/permissions/:id', requireOwner, async (req, res) => {
+  const branch = req.ownerBranch;
+  const staffId = Number(req.params.id);
+  const staff = await get(`SELECT id, is_owner FROM users WHERE id = ? AND coaching_id = ? AND branch_id = ? LIMIT 1`, [staffId, branch.coaching_id, branch.id]);
+  if (!staff || staff.is_owner) return res.status(403).send('Forbidden');
+  const selected = new Set(Array.isArray(req.body.permissions) ? req.body.permissions : [req.body.permissions].filter(Boolean));
+  await withTransaction(async (tx) => {
+    for (const permission of OWNER_PERMISSION_KEYS) {
+      await tx.run(
+        `INSERT INTO admin_permissions (coaching_id, branch_id, admin_user_id, permission_key, is_allowed, granted_by, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (coaching_id, branch_id, admin_user_id, permission_key)
+         DO UPDATE SET is_allowed = EXCLUDED.is_allowed, granted_by = EXCLUDED.granted_by, updated_at = CURRENT_TIMESTAMP`,
+        [branch.coaching_id, branch.id, staffId, permission, selected.has(permission), req.session.user.id]
+      );
+      console.log(`[PERMISSION UPDATED] adminId=${staffId} permission=${permission} ownerId=${req.session.user.id}`);
+    }
+  });
+  req.session.flash = { type: 'success', text: 'Permissions updated.' };
+  return res.redirect('/owner/dashboard?section=permissions');
+});
+
 app.post('/owner/branches/select', requireOwner, async (req, res) => {
   const branchId = Number.parseInt(String(req.body.branchId || ''), 10);
   const branch = await get(
-    `SELECT id FROM branches WHERE id = ? AND is_active = TRUE LIMIT 1`,
-    [branchId]
+    `SELECT id FROM branches WHERE id = ? AND code = ? AND name = ? AND is_active = TRUE LIMIT 1`,
+    [branchId, MERI_BRANCH_CODE, MERI_BRANCH_NAME]
   );
   if (!branch) {
     req.session.flash = { type: 'error', text: 'Branch not found' };
@@ -5581,6 +5851,11 @@ app.post('/owner/branches/select', requireOwner, async (req, res) => {
 
   req.session.ownerBranchId = branch.id;
   return res.redirect(`/owner/dashboard?branchId=${branch.id}`);
+});
+
+
+app.use(['/owner/plans', '/owner/coachings', '/owner/trial-requests'], requireOwner, (req, res) => {
+  return res.status(403).send('Forbidden');
 });
 
 app.post('/owner/plans/:id', requireOwner, async (req, res) => {
@@ -5932,6 +6207,14 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  const adminPermissions = req.session.user.role === 'admin' ? await getAdminPermissions(coachingId, branchId, req.session.user.id) : new Set();
+  const canViewFeeTotals = adminPermissions.has('fees.view_totals');
+  const canViewAllFeeEntries = adminPermissions.has('fees.view_all_entries');
+  const canViewOwnFeeEntries = adminPermissions.has('fees.view_own_entries');
+  const canManageExpenses = adminPermissions.has('expenses.manage');
+  if (activeSection === 'fees' && !adminPermissions.has('fees.entry') && !canViewAllFeeEntries && !canViewOwnFeeEntries) {
+    return accessDenied(res);
+  }
   const isOverviewSection = activeSection === 'overview';
   const needsStudents = ['overview', 'students', 'attendance', 'fees', 'notes', 'whatsapp'].includes(activeSection);
   const needsPapers = ['overview', 'papers', 'omr'].includes(activeSection);
@@ -6047,13 +6330,16 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     [coachingId, branchId]
   ) : Promise.resolve([]);
 
+  const feeCreatedByFilter = canViewAllFeeEntries ? null : (canViewOwnFeeEntries ? req.session.user.id : -1);
   const feesPromise = needsFees ? getFeeReportRows(coachingId, branchId, {
     feesDate: feesDateFilter,
     feesMonth: feesDateFilter ? '' : feesMonthFilter,
     limit: 150,
+    createdBy: feeCreatedByFilter,
   }) : Promise.resolve([]);
-  const financeSummaryPromise = needsFees ? getFinanceSummary(coachingId, branchId, expenseMonthFilter) : Promise.resolve(null);
-  const expensesPromise = needsFees ? getExpenseRows(coachingId, branchId, expenseMonthFilter) : Promise.resolve([]);
+  if (needsFees && !canViewFeeTotals) console.log(`[FEE TOTALS HIDDEN] userId=${req.session.user.id} branchId=${branchId}`);
+  const financeSummaryPromise = needsFees && canViewFeeTotals ? getFinanceSummary(coachingId, branchId, expenseMonthFilter) : Promise.resolve(null);
+  const expensesPromise = needsFees && (adminPermissions.has('expenses.view') || canManageExpenses) ? getExpenseRows(coachingId, branchId, expenseMonthFilter) : Promise.resolve([]);
 
   const notesPromise = needsNotes ? all(
     `SELECT bn.id, bn.batch_id, bn.standard, bn.course, bn.title, bn.resource_url, bn.description, bn.created_at,
@@ -6263,6 +6549,11 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     feesDateFilter,
     feesMonthFilter,
     expenseMonthFilter,
+    adminPermissions,
+    canViewFeeTotals,
+    canViewAllFeeEntries,
+    canViewOwnFeeEntries,
+    canManageExpenses,
     fees,
     financeSummary,
     expenses,
@@ -8550,7 +8841,7 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
 });
 
 
-app.post('/admin/expenses', requireCoachingAdmin, async (req, res) => {
+app.post('/admin/expenses', requireCoachingAdmin, requirePermission('expenses.manage'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const amount = Number(req.body.amount);
@@ -8592,7 +8883,7 @@ app.post('/admin/expenses', requireCoachingAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/expenses/:id/delete', requireCoachingAdmin, async (req, res) => {
+app.post('/admin/expenses/:id/delete', requireCoachingAdmin, requirePermission('expenses.manage'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const expenseId = Number(req.params.id);
@@ -8622,7 +8913,7 @@ app.post('/admin/expenses/:id/delete', requireCoachingAdmin, async (req, res) =>
   }
 });
 
-app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
+app.post('/admin/fees', requireCoachingAdmin, requirePermission('fees.entry'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const rollNo = (req.body.rollNo || '').trim();
@@ -9266,6 +9557,7 @@ async function prepareApp() {
       .then(() => ensureNotificationSchema())
       .then(() => ensureOnboardingWhatsAppSchema())
       .then(() => ensureFeeStructureSchema())
+      .then(() => ensureAdminPermissionSchema())
       .then(() => ensureExpensesSchema())
       .then(() => ensureOmrSchema())
       .then(() => ensurePerformanceIndexes())

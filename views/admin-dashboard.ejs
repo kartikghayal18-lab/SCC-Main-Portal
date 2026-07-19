@@ -293,6 +293,7 @@
                 </article>
               <% }) %>
             </section>
+            <% } %>
 
             <section class="ops2-split-grid">
               <section class="ops2-panel ops2-panel--chartwide">
@@ -784,6 +785,7 @@
             <% const pendingFeesCount = fees.filter((item) => item.status === 'pending').length; %>
             <% const paidFeesCount = fees.filter((item) => item.status === 'paid').length; %>
             <% const overdueFeesCount = fees.filter((item) => item.status === 'overdue').length; %>
+            <% if (canViewFeeTotals) { %>
             <section class="ops2-metrics-grid ops2-metrics-grid--compact">
               <article class="ops2-metric-card ops2-metric-card--neutral"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">₹</span><span class="ops2-metric-card__trend">Assigned</span></div><strong><%= financeSummary?.formatted?.totalFees || '₹0' %></strong><span class="ops2-metric-card__label">Total Fees</span><small>Active students</small><div class="ops2-sparkbars"><span style="height:44%"></span><span style="height:66%"></span><span style="height:58%"></span><span style="height:72%"></span><span style="height:64%"></span></div></article>
               <article class="ops2-metric-card ops2-metric-card--success"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">₹</span><span class="ops2-metric-card__trend">Overall</span></div><strong><%= financeSummary?.formatted?.totalCollected || '₹0' %></strong><span class="ops2-metric-card__label">Total Collected</span><small>Paid records only</small><div class="ops2-sparkbars"><span style="height:52%"></span><span style="height:71%"></span><span style="height:49%"></span><span style="height:83%"></span><span style="height:66%"></span></div></article>
@@ -827,7 +829,7 @@
                   <div class="ops2-field"><label>Date</label><input type="date" name="feesDate" value="<%= feesDateFilter %>" /></div>
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply</button></div>
                 </form>
-                <div class="ops2-chip-row"><span class="ops2-chip"><strong><%= paidFeesCount %></strong> paid</span><span class="ops2-chip"><strong><%= pendingFeesCount %></strong> pending</span><a href="<%= feesReportHref %>" class="ops2-inline-link">Download PDF</a><a href="/admin/dashboard?section=fees" class="ops2-inline-link">Clear</a></div>
+                <div class="ops2-chip-row"><span class="ops2-chip"><strong><%= paidFeesCount %></strong> paid</span><span class="ops2-chip"><strong><%= pendingFeesCount %></strong> pending</span><% if (canViewFeeTotals || canViewAllFeeEntries) { %><a href="<%= feesReportHref %>" class="ops2-inline-link">Download PDF</a><% } %><a href="/admin/dashboard?section=fees" class="ops2-inline-link">Clear</a></div>
               </section>
             </section>
 
@@ -852,11 +854,13 @@
                             <a class="ops2-inline-link" href="/admin/fees/<%= f.id %>/receipt?disposition=attachment">PDF</a>
                           <% } %>
                           <% if (!f.due_date && f.status !== 'paid') { %><span class="muted">-</span><% } %>
+                          <% if (adminPermissions && adminPermissions.has && adminPermissions.has('fees.delete')) { %>
                           <form method="post" action="/admin/fees/<%= f.id %>/delete" class="inline-delete-form" onsubmit="if (!confirm('Delete this specific fee record? This cannot be undone.')) return false; this.querySelector('button').disabled = true; return true;">
                             <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                             <input type="hidden" name="redirectTo" value="/admin/dashboard?section=fees" />
                             <button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button>
                           </form>
+                          <% } %>
                         </td>
                       </tr>
                     <% }) %>
@@ -866,6 +870,7 @@
             </section>
 
 
+            <% if (adminPermissions && adminPermissions.has && (adminPermissions.has('expenses.view') || adminPermissions.has('expenses.manage'))) { %>
             <section class="ops2-panel">
               <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Monthly Expenses</p><h3>Expense tracking</h3></div><span class="ops2-chip"><strong><%= financeSummary?.formatted?.totalExpenses || '₹0' %></strong> this month</span></div>
               <section class="ops2-split-grid">
@@ -915,6 +920,7 @@
                 </table>
               </div>
             </section>
+            <% } %>
           <% } %>
 
           <% if (activeSection === 'papers') { %>
@@ -1251,7 +1257,7 @@
               <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Audit</p><h3>Recent WhatsApp logs</h3></div></div>
               <div class="ops2-table-shell">
                 <table class="ops2-table ops2-table--wide">
-                  <thead><tr><th>Time</th><th>Student</th><th>Phone</th><th>Type</th><th>Status</th><th>Meta ID</th></tr></thead>
+                  <thead><tr><th>Time</th><th>Student</th><th>Phone</th><th>Type</th><th>Status</th><th>Meta ID</th><th>Retry</th><th>Actions</th></tr></thead>
                   <tbody>
                     <% whatsappLogs.forEach((log) => { %>
                       <tr>
@@ -1259,12 +1265,23 @@
                         <td><%= log.name || log.roll_no || '-' %></td>
                         <td><%= log.phone_number %></td>
                         <td><%= log.message_type %></td>
-                        <td><span class="status <%= log.status %>"><%= log.status %></span></td>
+                        <td><span class="status <%= log.status %>"><%= log.status %></span><% if (log.last_error) { %><br><small class="muted"><%= log.last_error %></small><% } %></td>
                         <td><%= log.meta_message_id || '-' %></td>
+                        <td><%= Number(log.retry_count || 0) %><% if (log.resent_at) { %><br><small class="muted"><%= log.resent_at %></small><% } %></td>
+                        <td>
+                          <% if (String(log.status || '').toLowerCase() === 'failed') { %>
+                            <form method="post" action="/admin/whatsapp-logs/<%= log.id %>/resend" onsubmit="if (!confirm('Resend this failed WhatsApp message?')) return false; this.querySelector('button').disabled = true; return true;">
+                              <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                              <button type="submit" class="ops2-inline-link-btn">Resend</button>
+                            </form>
+                          <% } else { %>
+                            <span class="muted">-</span>
+                          <% } %>
+                        </td>
                       </tr>
                     <% }) %>
                     <% if (!whatsappLogs.length) { %>
-                      <tr><td colspan="6" class="muted">No WhatsApp messages sent yet.</td></tr>
+                      <tr><td colspan="8" class="muted">No WhatsApp messages sent yet.</td></tr>
                     <% } %>
                   </tbody>
                 </table>
@@ -1430,5 +1447,6 @@
       });
     });
   </script>
+<script src="/public/super-admin-shortcut.js" data-user-role="<%= user?.role || '' %>"></script>
 </body>
 </html>

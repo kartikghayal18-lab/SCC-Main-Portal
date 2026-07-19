@@ -20,6 +20,10 @@ function truncateMessage(value) {
   return String(value || '').slice(0, 4000);
 }
 
+function getMetaErrorCode(error) {
+  return error?.response?.error?.code || error?.response?.error?.error_subcode || null;
+}
+
 function getEnvSettings() {
   return {
     accessToken: String(process.env.WHATSAPP_ACCESS_TOKEN || '').trim(),
@@ -83,9 +87,22 @@ async function ensureWhatsAppSchema() {
       message_content TEXT,
       status VARCHAR(40) NOT NULL DEFAULT 'pending',
       meta_message_id VARCHAR(160),
+      document_url TEXT,
+      document_filename VARCHAR(255),
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      resent_at TIMESTAMPTZ,
+      resent_by INTEGER,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS document_url TEXT`);
+  await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS document_filename VARCHAR(255)`);
+  await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0`);
+  await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS last_error TEXT`);
+  await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS resent_at TIMESTAMPTZ`);
+  await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS resent_by INTEGER`);
 
   await run(`
     CREATE INDEX IF NOT EXISTS whatsapp_logs_coaching_created_idx
@@ -151,6 +168,8 @@ async function logWhatsAppMessage({
   messageContent = '',
   status = 'pending',
   metaMessageId = null,
+  documentUrl = null,
+  documentFilename = null,
 }) {
   let resolvedBranchId = branchId;
   if (!resolvedBranchId && studentId) {
@@ -163,8 +182,8 @@ async function logWhatsAppMessage({
 
   const result = await run(
     `INSERT INTO whatsapp_logs (
-      coaching_id, branch_id, student_id, phone_number, message_type, message_content, status, meta_message_id
-    ) VALUES (?, COALESCE(?, app_current_branch_id()), ?, ?, ?, ?, ?, ?)`,
+      coaching_id, branch_id, student_id, phone_number, message_type, message_content, status, meta_message_id, document_url, document_filename
+    ) VALUES (?, COALESCE(?, app_current_branch_id()), ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       resolvedBranchId,
@@ -174,6 +193,8 @@ async function logWhatsAppMessage({
       truncateMessage(messageContent),
       normalizeStatus(status),
       metaMessageId || null,
+      documentUrl || null,
+      documentFilename || null,
     ]
   );
   return result.lastID;
@@ -307,7 +328,7 @@ async function sendTextMessage({ coachingId, branchId = null, studentId = null, 
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
     );
-    return { ok: false, failed: true, error: error.message, logId };
+    return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
 }
 
@@ -331,6 +352,8 @@ async function sendDocumentMessage({
     messageType: 'document',
     messageContent,
     status: 'pending',
+    documentUrl,
+    documentFilename: filename || 'result.pdf',
   });
 
   try {
@@ -374,7 +397,7 @@ async function sendDocumentMessage({
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
     );
-    return { ok: false, failed: true, error: error.message, logId };
+    return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
 }
 
@@ -424,7 +447,7 @@ async function sendImageMessage({
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
     );
-    return { ok: false, failed: true, error: error.message, logId };
+    return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
 }
 
@@ -495,7 +518,7 @@ async function sendTemplateMessage({
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
     );
-    return { ok: false, failed: true, error: error.message, logId };
+    return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
 }
 
@@ -529,6 +552,154 @@ async function sendBulkMessages({ coachingId, branchId, recipients, message, set
   return summary;
 }
 
+function extractFirstUrl(value) {
+  const match = String(value || '').match(/https?:\/\/\S+/);
+  return match ? match[0].replace(/[)\].,;]+$/, '') : '';
+}
+
+function getSafeErrorMessage(resultOrError) {
+  const code = getMetaErrorCode(resultOrError) || resultOrError?.errorCode || '';
+  const message = resultOrError?.error || resultOrError?.message || resultOrError?.response?.error?.message || 'WhatsApp resend failed';
+  return [code, message].filter(Boolean).join(': ').slice(0, 600);
+}
+
+function isMetaReEngagementError(resultOrError) {
+  const code = String(getMetaErrorCode(resultOrError) || resultOrError?.errorCode || '');
+  const message = String(resultOrError?.error || resultOrError?.message || resultOrError?.response?.error?.message || '').toLowerCase();
+  return code === '131047' || message.includes('131047') || message.includes('re-engagement');
+}
+
+function buildManualResendTemplateComponents({ log, studentName, documentUrl }) {
+  return [{
+    type: 'body',
+    parameters: [
+      { type: 'text', text: studentName || 'Parent' },
+      { type: 'text', text: studentName || 'Student' },
+      { type: 'text', text: 'WhatsApp update' },
+      { type: 'text', text: '-' },
+      { type: 'text', text: '-' },
+      { type: 'text', text: documentUrl || extractFirstUrl(log.message_content) || '-' },
+    ],
+  }];
+}
+
+async function markManualResendSuccess(logId, metaMessageId, resentBy) {
+  await run(
+    `UPDATE whatsapp_logs
+     SET status = 'sent', meta_message_id = ?, resent_at = CURRENT_TIMESTAMP, resent_by = ?,
+         retry_count = COALESCE(retry_count, 0) + 1, last_error = NULL
+     WHERE id = ?`,
+    [metaMessageId || null, resentBy || null, logId]
+  );
+}
+
+async function markManualResendFailure(logId, errorText) {
+  await run(
+    `UPDATE whatsapp_logs
+     SET status = 'failed', retry_count = COALESCE(retry_count, 0) + 1, last_error = ?
+     WHERE id = ?`,
+    [truncateMessage(errorText || 'WhatsApp resend failed'), logId]
+  );
+}
+
+async function resendWhatsAppLog({ logId, coachingId, branchId, resentBy }) {
+  const log = await get(
+    `SELECT wl.*, u.name AS student_name, u.roll_no
+     FROM whatsapp_logs wl
+     LEFT JOIN users u ON u.id = wl.student_id AND u.branch_id = wl.branch_id
+     WHERE wl.id = ? LIMIT 1`,
+    [logId]
+  );
+
+  if (!log || Number(log.coaching_id) !== Number(coachingId) || Number(log.branch_id) !== Number(branchId) || normalizeStatus(log.status) !== 'failed') {
+    console.warn(`[WHATSAPP MANUAL RESEND DENIED] logId=${logId}`);
+    return { ok: false, denied: true, statusCode: 403, message: 'Resend denied for this WhatsApp log.' };
+  }
+
+  const settings = await getWhatsAppSettings(coachingId, branchId);
+  const phoneNumber = cleanPhoneNumber(log.phone_number);
+  const messageType = String(log.message_type || 'text').toLowerCase();
+  const messageContent = String(log.message_content || '').replace(/\n\nError:.*$/s, '').trim();
+  const documentUrl = log.document_url || extractFirstUrl(messageContent);
+  const documentFilename = log.document_filename || 'result.pdf';
+
+  console.log(`[WHATSAPP MANUAL RESEND START] logId=${logId} branchId=${branchId} coachingId=${coachingId}`);
+
+  let normalResult = null;
+  try {
+    if (messageType === 'document') {
+      if (!documentUrl) throw new Error('Original document URL is missing from this failed log.');
+      normalResult = await sendMetaMessage({
+        settings,
+        payload: {
+          to: phoneNumber,
+          type: 'document',
+          document: { link: documentUrl, filename: documentFilename, caption: messageContent || 'Document attached.' },
+        },
+      });
+    } else {
+      normalResult = await sendMetaMessage({
+        settings,
+        payload: {
+          to: phoneNumber,
+          type: 'text',
+          text: { preview_url: false, body: messageContent || 'Message from coaching portal.' },
+        },
+      });
+    }
+    const metaMessageId = normalResult?.messages?.[0]?.id || null;
+    await markManualResendSuccess(logId, metaMessageId, resentBy);
+    console.log(`[WHATSAPP MANUAL RESEND NORMAL SENT] logId=${logId}`);
+    return { ok: true, metaMessageId };
+  } catch (error) {
+    if (!isMetaReEngagementError(error)) {
+      const safeError = getSafeErrorMessage(error);
+      await markManualResendFailure(logId, safeError);
+      console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=${getMetaErrorCode(error) || ''}`);
+      return { ok: false, failed: true, message: `Resend failed: ${safeError}` };
+    }
+  }
+
+  console.warn(`[WHATSAPP MANUAL RESEND 131047] logId=${logId}`);
+  const templateName = String(process.env.WHATSAPP_PAPER_TEMPLATE_NAME || 'paper_result_notification').trim();
+  const languageCode = String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en').trim();
+  if (!templateName) {
+    const message = 'Resend failed: approved WhatsApp template is required outside the 24-hour window.';
+    await markManualResendFailure(logId, message);
+    console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=131047`);
+    return { ok: false, failed: true, message };
+  }
+
+  try {
+    console.log(`[WHATSAPP MANUAL RESEND TEMPLATE START] logId=${logId}`);
+    const templateResult = await sendMetaMessage({
+      settings,
+      payload: {
+        to: phoneNumber,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: languageCode },
+          components: buildManualResendTemplateComponents({
+            log,
+            studentName: log.student_name || log.roll_no || 'Student',
+            documentUrl,
+          }),
+        },
+      },
+    });
+    const metaMessageId = templateResult?.messages?.[0]?.id || null;
+    await markManualResendSuccess(logId, metaMessageId, resentBy);
+    console.log(`[WHATSAPP MANUAL RESEND TEMPLATE SENT] logId=${logId}`);
+    return { ok: true, metaMessageId, template: true };
+  } catch (error) {
+    const message = 'Resend failed: approved WhatsApp template is required outside the 24-hour window.';
+    await markManualResendFailure(logId, `${message} ${getSafeErrorMessage(error)}`);
+    console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=${getMetaErrorCode(error) || 'template'}`);
+    return { ok: false, failed: true, message };
+  }
+}
+
 async function getRecentWhatsAppLogs(coachingId, branchId, limit = 25) {
   return all(
     `SELECT wl.*, u.roll_no, u.name
@@ -546,6 +717,7 @@ module.exports = {
   getWhatsAppSettings,
   saveWhatsAppSettings,
   getRecentWhatsAppLogs,
+  resendWhatsAppLog,
   updateWhatsAppLogStatus,
   sendTextMessage,
   sendDocumentMessage,

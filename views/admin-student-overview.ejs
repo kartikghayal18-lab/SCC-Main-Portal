@@ -197,7 +197,7 @@
       <div class="card">
         <h2>Fee History</h2>
         <table>
-          <tr><th>Amount</th><th>Due Date</th><th>Payment Date</th><th>Status</th><th>Notes</th></tr>
+          <tr><th>Amount</th><th>Due Date</th><th>Payment Date</th><th>Status</th><th>Notes</th><th>Actions</th></tr>
           <% fees.forEach((fee) => { %>
             <tr>
               <td><%= fee.amount %></td>
@@ -205,6 +205,13 @@
               <td><%= fee.payment_date || '-' %></td>
               <td><span class="status <%= fee.status %>"><%= fee.status %></span></td>
               <td><%= fee.notes || '-' %></td>
+              <td>
+                <form method="post" action="/admin/fees/<%= fee.id %>/delete" style="display:inline-block" onsubmit="if (!confirm('Delete this specific fee record? This cannot be undone.')) return false; this.querySelector('button').disabled = true; return true;">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <input type="hidden" name="redirectTo" value="/admin/students/<%= student.id %>/overview" />
+                  <button type="submit" class="btn danger compact">Delete</button>
+                </form>
+              </td>
             </tr>
           <% }) %>
         </table>
@@ -357,5 +364,6 @@
       requestAnimationFrame(animate);
     }
   </script>
+<script src="/public/super-admin-shortcut.js" data-user-role="<%= user?.role || '' %>"></script>
 </body>
 </html>

@@ -11,9 +11,9 @@
   <div class="container wide">
     <div class="topbar card hero-card">
       <div>
-        <p class="eyebrow">Platform Owner</p>
-        <h1>Owner Dashboard</h1>
-        <p class="muted">Manage coaching access, seat limits, trial approvals, and tenant portals from one place.</p>
+        <p class="eyebrow"><%= branchOwnerMode ? 'Branch Owner' : 'Platform Owner' %></p>
+        <h1><%= branchOwnerMode ? 'Owner Control' : 'Owner Dashboard' %></h1>
+        <p class="muted"><%= branchOwnerMode ? 'Manage SCC - Meri Branch staff, permissions, and finance from one branch-scoped panel.' : 'Manage coaching access, seat limits, trial approvals, and tenant portals from one place.' %></p>
         <div class="hero-chip-row">
           <span class="info-chip">Coachings <strong><%= stats.totalCoachings %></strong></span>
           <span class="info-chip">Active <strong><%= stats.activeCoachings %></strong></span>
@@ -29,6 +29,7 @@
       <div class="alert <%= flash.type %>"><%= flash.text %></div>
     <% } %>
 
+    <% if (!branchOwnerMode) { %>
     <section class="card">
       <form method="post" action="/owner/branches/select" class="grid two">
         <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
@@ -55,6 +56,7 @@
         </div>
       <% } %>
     </section>
+    <% } %>
 
     <section class="section-switcher card">
       <div class="sidebar-brand">
@@ -67,12 +69,46 @@
         </div>
         <p class="sidebar-copy">Manage coaching tenants, subscriptions, and trial approvals from one calm command panel.</p>
       </div>
-      <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/owner/dashboard?section=overview">Overview</a>
-      <a class="sec-btn <%= activeSection === 'coachings' ? 'active' : '' %>" href="/owner/dashboard?section=coachings">Coaching Tenants</a>
-      <a class="sec-btn <%= activeSection === 'trial-requests' ? 'active' : '' %>" href="/owner/dashboard?section=trial-requests">Trial Requests</a>
+      <% if (branchOwnerMode) { %>
+        <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/owner/dashboard?section=overview">Overview</a>
+        <a class="sec-btn <%= activeSection === 'finance' ? 'active' : '' %>" href="/owner/dashboard?section=finance">Finance</a>
+        <a class="sec-btn <%= activeSection === 'staff' ? 'active' : '' %>" href="/owner/dashboard?section=staff">Staff</a>
+        <a class="sec-btn <%= activeSection === 'permissions' ? 'active' : '' %>" href="/owner/dashboard?section=permissions">Permissions</a>
+      <% } else { %>
+        <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/owner/dashboard?section=overview">Overview</a>
+        <a class="sec-btn <%= activeSection === 'coachings' ? 'active' : '' %>" href="/owner/dashboard?section=coachings">Coaching Tenants</a>
+        <a class="sec-btn <%= activeSection === 'trial-requests' ? 'active' : '' %>" href="/owner/dashboard?section=trial-requests">Trial Requests</a>
+      <% } %>
     </section>
 
-    <% if (activeSection === 'overview') { %>
+    <% if (branchOwnerMode && activeSection === 'overview') { %>
+      <section class="stats-grid">
+        <div class="stat-card"><p>Active Students</p><h3><%= stats.totalStudents %></h3></div>
+        <div class="stat-card"><p>Total Expected Fees</p><h3><%= financeSummary.formatted.totalFees %></h3></div>
+        <div class="stat-card"><p>Total Collected</p><h3><%= financeSummary.formatted.totalCollected %></h3></div>
+        <div class="stat-card"><p>Total Pending</p><h3><%= financeSummary.formatted.totalPending %></h3></div>
+        <div class="stat-card"><p>Monthly Expenses</p><h3><%= financeSummary.formatted.totalExpenses %></h3></div>
+        <div class="stat-card"><p>Net Balance</p><h3><%= financeSummary.formatted.netBalance %></h3></div>
+      </section>
+      <section class="card"><h2>Today’s Fee Entries</h2><table><tr><th>ID</th><th>Time</th><th>Student</th><th>Amount</th><th>Status</th><th>Entered By</th></tr><% todayFees.forEach((fee) => { %><tr><td><%= fee.id %></td><td><%= fee.created_at %></td><td><%= fee.name %> (<%= fee.roll_no %>)</td><td><%= fee.amount %></td><td><%= fee.status %></td><td><%= fee.entered_by_name || fee.entered_by_username || '-' %></td></tr><% }) %><% if (!todayFees.length) { %><tr><td colspan="6" class="muted">No fee entries today.</td></tr><% } %></table></section>
+      <section class="card"><h2>Fee Entries Grouped By Staff</h2><table><tr><th>Staff</th><th>Entries</th><th>Amount</th></tr><% groupedByStaff.forEach((row) => { %><tr><td><%= row.staff_name %></td><td><%= row.entry_count %></td><td><%= row.amount %></td></tr><% }) %></table></section>
+      <section class="card"><h2>Shortcuts</h2><p><a href="/owner/dashboard?section=finance">Open Finance</a> | <a href="/owner/dashboard?section=staff">Manage Staff</a> | <a href="/owner/dashboard?section=permissions">Manage Permissions</a></p></section>
+    <% } %>
+
+    <% if (branchOwnerMode && activeSection === 'finance') { %>
+      <section class="card"><h2>Owner Finance</h2><table><tr><th>ID</th><th>Date/Time</th><th>Student</th><th>Roll</th><th>Amount</th><th>Status</th><th>Mode</th><th>Notes</th><th>Entered By</th></tr><% feeEntries.forEach((fee) => { %><tr><td><%= fee.id %></td><td><%= fee.created_at %></td><td><%= fee.name %></td><td><%= fee.roll_no %></td><td><%= fee.amount %></td><td><%= fee.status %></td><td><%= fee.payment_mode || '-' %></td><td><%= fee.notes || '-' %></td><td><%= fee.entered_by_name || fee.entered_by_username || '-' %></td></tr><% }) %></table></section>
+      <section class="card"><h2>Pending / Overdue</h2><table><tr><th>ID</th><th>Student</th><th>Roll</th><th>Amount</th><th>Status</th><th>Due</th></tr><% pendingOverdue.forEach((fee) => { %><tr><td><%= fee.id %></td><td><%= fee.name %></td><td><%= fee.roll_no %></td><td><%= fee.amount %></td><td><%= fee.status %></td><td><%= fee.due_date || '-' %></td></tr><% }) %></table></section>
+    <% } %>
+
+    <% if (branchOwnerMode && activeSection === 'staff') { %>
+      <section class="grid two"><div class="card"><h2>Create Staff</h2><form method="post" action="/owner/staff"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><label>Username</label><input name="username" required /><label>Name</label><input name="name" required /><label>Email</label><input type="email" name="email" /><label>Phone</label><input name="contactPhone" /><label>Temporary Password</label><input type="password" name="password" required /><button class="btn" type="submit">Create Staff</button></form></div><div class="card"><h2>Staff Accounts</h2><table><tr><th>User</th><th>Email</th><th>Status</th><th>Last Login</th><th>Actions</th></tr><% staff.forEach((admin) => { %><tr><td><%= admin.name || admin.username %><div class="tiny-note"><%= admin.username %></div></td><td><%= admin.email || '-' %></td><td><%= admin.is_owner ? 'Owner' : admin.is_disabled ? 'Disabled' : 'Active' %></td><td><%= admin.last_login_at || '-' %></td><td><% if (!admin.is_owner) { %><form method="post" action="/owner/staff/<%= admin.id %>/update"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><input name="name" value="<%= admin.name || '' %>" /><input name="email" value="<%= admin.email || '' %>" /><input name="contactPhone" value="<%= admin.contact_phone || '' %>" /><label><input type="checkbox" name="isDisabled" value="1" <%= admin.is_disabled ? 'checked' : '' %> /> Disabled</label><button class="btn compact" type="submit">Save</button></form><form method="post" action="/owner/staff/<%= admin.id %>/password"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><input type="password" name="password" placeholder="New password" required /><button class="btn compact" type="submit">Reset</button></form><% } %></td></tr><% }) %></table></div></section>
+    <% } %>
+
+    <% if (branchOwnerMode && activeSection === 'permissions') { %>
+      <section class="card"><h2>Permissions</h2><% staff.filter((admin) => !admin.is_owner).forEach((admin) => { %><details class="trial-accordion"><summary><strong><%= admin.name || admin.username %></strong><span class="tiny-note"> <%= admin.username %></span></summary><form method="post" action="/owner/permissions/<%= admin.id %>" class="grid two"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><% permissionKeys.forEach((permission) => { %><label><input type="checkbox" name="permissions" value="<%= permission %>" <%= (staffPermissions[admin.id] || []).includes(permission) ? 'checked' : '' %> /> <%= permission %></label><% }) %><button class="btn" type="submit">Save Permissions</button></form></details><% }) %></section>
+    <% } %>
+
+    <% if (!branchOwnerMode && activeSection === 'overview') { %>
       <section class="stats-grid">
         <div class="stat-card"><p>Total Coachings</p><h3><%= stats.totalCoachings %></h3></div>
         <div class="stat-card"><p>Active Coachings</p><h3><%= stats.activeCoachings %></h3></div>
@@ -112,7 +148,7 @@
       </section>
     <% } %>
 
-    <% if (activeSection === 'coachings') { %>
+    <% if (!branchOwnerMode && activeSection === 'coachings') { %>
       <section class="grid two">
         <div class="card">
           <h2>Create Coaching Tenant</h2>
@@ -310,7 +346,7 @@
       </section>
     <% } %>
 
-    <% if (activeSection === 'trial-requests') { %>
+    <% if (!branchOwnerMode && activeSection === 'trial-requests') { %>
       <section class="card">
         <h2>Trial Requests</h2>
         <% if (!trialRequests.length) { %>
@@ -365,5 +401,6 @@
       </section>
     <% } %>
   </div>
+<script src="/public/super-admin-shortcut.js" data-user-role="<%= user?.role || '' %>"></script>
 </body>
 </html>
