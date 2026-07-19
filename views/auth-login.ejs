@@ -193,6 +193,6 @@
     });
     toggleLoginForm();
   </script>
-<script src="/public/super-admin-shortcut.js" data-user-role="<%= typeof user !== \"undefined\" && user ? user.role || \"\" : \"\" %>"></script>
+<script src="/public/super-admin-shortcut.js" data-user-role="<%= typeof user !== 'undefined' && user ? (user.role || '') : '' %>"></script>
 </body>
 </html>
