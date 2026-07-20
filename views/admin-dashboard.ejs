@@ -793,6 +793,7 @@
               <article class="ops2-metric-card ops2-metric-card--danger"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">-</span><span class="ops2-metric-card__trend"><%= expenseMonthFilter %></span></div><strong><%= financeSummary?.formatted?.totalExpenses || '₹0' %></strong><span class="ops2-metric-card__label">Monthly Expenses</span><small>Selected month</small><div class="ops2-sparkbars"><span style="height:22%"></span><span style="height:31%"></span><span style="height:47%"></span><span style="height:58%"></span><span style="height:41%"></span></div></article>
               <article class="ops2-metric-card ops2-metric-card--primary"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">=</span><span class="ops2-metric-card__trend">Net</span></div><strong><%= financeSummary?.formatted?.netBalance || '₹0' %></strong><span class="ops2-metric-card__label">Net Balance</span><small>Collected minus expenses</small><div class="ops2-sparkbars"><span style="height:38%"></span><span style="height:59%"></span><span style="height:68%"></span><span style="height:73%"></span><span style="height:62%"></span></div></article>
             </section>
+            <% } %>
 
             <section class="ops2-split-grid">
               <section class="ops2-panel" id="fees-form-panel">
@@ -1447,6 +1448,5 @@
       });
     });
   </script>
-<script src="/public/super-admin-shortcut.js" data-user-role="<%= user?.role || '' %>"></script>
 </body>
 </html>

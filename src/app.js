@@ -1809,38 +1809,26 @@ async function getMeriBranchRecord() {
   );
 }
 
-async function ensureAdminPermissionSchema() {
-  await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT FALSE`);
-  await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ`);
-  await run(`
-    CREATE TABLE IF NOT EXISTS admin_permissions (
-      id SERIAL PRIMARY KEY,
-      coaching_id INTEGER NOT NULL,
-      branch_id INTEGER NOT NULL,
-      admin_user_id INTEGER NOT NULL,
-      permission_key VARCHAR(120) NOT NULL,
-      is_allowed BOOLEAN NOT NULL DEFAULT FALSE,
-      granted_by INTEGER,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE (coaching_id, branch_id, admin_user_id, permission_key)
-    )
-  `);
-}
-
 async function getAdminPermissions(coachingId, branchId, adminUserId) {
-  const rows = await all(
-    `SELECT permission_key, is_allowed
-     FROM admin_permissions
-     WHERE coaching_id = ? AND branch_id = ? AND admin_user_id = ?`,
-    [coachingId, branchId, adminUserId]
-  );
-  const explicit = new Map(rows.map((row) => [row.permission_key, row.is_allowed === true || row.is_allowed === 1]));
-  const allowed = new Set();
-  OWNER_PERMISSION_KEYS.forEach((key) => {
-    if (explicit.has(key) ? explicit.get(key) : DEFAULT_STAFF_PERMISSIONS.has(key)) allowed.add(key);
-  });
-  return allowed;
+  try {
+    const rows = await all(
+      `SELECT permission_key, is_allowed
+       FROM admin_permissions
+       WHERE coaching_id = ? AND branch_id = ? AND admin_user_id = ?`,
+      [coachingId, branchId, adminUserId]
+    );
+    const explicit = new Map(rows.map((row) => [row.permission_key, row.is_allowed === true || row.is_allowed === 1]));
+    const allowed = new Set();
+    OWNER_PERMISSION_KEYS.forEach((key) => {
+      if (explicit.has(key) ? explicit.get(key) : DEFAULT_STAFF_PERMISSIONS.has(key)) allowed.add(key);
+    });
+    return allowed;
+  } catch (error) {
+    if (String(error.message || '').includes('admin_permissions')) {
+      return new Set(DEFAULT_STAFF_PERMISSIONS);
+    }
+    throw error;
+  }
 }
 
 async function userHasPermission(req, permissionKey) {
@@ -4117,6 +4105,9 @@ app.get('/trial/apply', async (req, res) => {
   return renderTrialApplyPage(req, res);
 });
 
+app.get('/super-admin', (req, res) => res.redirect('/owner/dashboard'));
+app.get('/super-admin/login', (req, res) => res.redirect('/owner/login'));
+
 app.get('/owner/login', async (req, res) => {
   if (req.session.user?.isOwner) return res.redirect('/owner/dashboard');
   if (req.session.user) return res.redirect('/');
@@ -6207,12 +6198,15 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
-  const adminPermissions = req.session.user.role === 'admin' ? await getAdminPermissions(coachingId, branchId, req.session.user.id) : new Set();
-  const canViewFeeTotals = adminPermissions.has('fees.view_totals');
-  const canViewAllFeeEntries = adminPermissions.has('fees.view_all_entries');
-  const canViewOwnFeeEntries = adminPermissions.has('fees.view_own_entries');
-  const canManageExpenses = adminPermissions.has('expenses.manage');
-  if (activeSection === 'fees' && !adminPermissions.has('fees.entry') && !canViewAllFeeEntries && !canViewOwnFeeEntries) {
+  const isMeriBranch = req.currentBranch?.code === MERI_BRANCH_CODE;
+  const adminPermissions = isMeriBranch && req.session.user.role === 'admin'
+    ? await getAdminPermissions(coachingId, branchId, req.session.user.id)
+    : new Set(OWNER_PERMISSION_KEYS);
+  const canViewFeeTotals = !isMeriBranch || adminPermissions.has('fees.view_totals');
+  const canViewAllFeeEntries = !isMeriBranch || adminPermissions.has('fees.view_all_entries');
+  const canViewOwnFeeEntries = !isMeriBranch || adminPermissions.has('fees.view_own_entries');
+  const canManageExpenses = !isMeriBranch || adminPermissions.has('expenses.manage');
+  if (isMeriBranch && activeSection === 'fees' && !adminPermissions.has('fees.entry') && !canViewAllFeeEntries && !canViewOwnFeeEntries) {
     return accessDenied(res);
   }
   const isOverviewSection = activeSection === 'overview';
@@ -6337,7 +6331,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     limit: 150,
     createdBy: feeCreatedByFilter,
   }) : Promise.resolve([]);
-  if (needsFees && !canViewFeeTotals) console.log(`[FEE TOTALS HIDDEN] userId=${req.session.user.id} branchId=${branchId}`);
+  if (isMeriBranch && needsFees && !canViewFeeTotals) console.log(`[FEE TOTALS HIDDEN] userId=${req.session.user.id} branchId=${branchId}`);
   const financeSummaryPromise = needsFees && canViewFeeTotals ? getFinanceSummary(coachingId, branchId, expenseMonthFilter) : Promise.resolve(null);
   const expensesPromise = needsFees && (adminPermissions.has('expenses.view') || canManageExpenses) ? getExpenseRows(coachingId, branchId, expenseMonthFilter) : Promise.resolve([]);
 
@@ -9557,7 +9551,6 @@ async function prepareApp() {
       .then(() => ensureNotificationSchema())
       .then(() => ensureOnboardingWhatsAppSchema())
       .then(() => ensureFeeStructureSchema())
-      .then(() => ensureAdminPermissionSchema())
       .then(() => ensureExpensesSchema())
       .then(() => ensureOmrSchema())
       .then(() => ensurePerformanceIndexes())
