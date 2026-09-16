@@ -359,10 +359,21 @@ function validateBulkPaperExcelColumns(normalizedHeaders) {
   }
 }
 
-// Roll Number and Checked File are read as raw trimmed strings on purpose (never
-// through parseOmrNumber) — the source Excel can contain leading zeros, stray
-// question marks, or other formatting artifacts in those two columns, and turning
-// them into numbers would silently corrupt the exact-match keys this import relies on.
+// Checked File is read as a raw trimmed string on purpose (never through
+// parseOmrNumber) — it must match an uploaded filename exactly.
+//
+// Roll Number is OCR output and is frequently corrupted with leading '?'
+// characters (e.g. "?????775"), or wrapped in label text (e.g. "Roll No:
+// ?????91"). The actual roll number is the LAST contiguous run of digits in
+// that value — not every digit in the string concatenated together, and
+// never the "_0001" / "_0002" sequence number embedded in the uploaded
+// filename, which is just a scan index and is never used as a roll number.
+function extractRollNumberDigits(value) {
+  const digitRuns = String(value || '').match(/\d+/g);
+  if (!digitRuns || !digitRuns.length) return '';
+  return digitRuns[digitRuns.length - 1];
+}
+
 function toBulkPaperExcelRows(fileBuffer) {
   const sheetRows = parseXlsxRows(fileBuffer);
   const headers = sheetRows.shift() || [];
@@ -379,10 +390,12 @@ function toBulkPaperExcelRows(fileBuffer) {
     normalizedHeaders.forEach((header, cellIndex) => {
       raw[header] = cells[cellIndex] !== undefined ? cells[cellIndex] : '';
     });
+    const rollNoRaw = getOmrValue(raw, ['Roll Number', 'Roll No']);
     return {
       rowNumber: index + 2,
       studentName: getOmrValue(raw, ['Student']),
-      rollNo: getOmrValue(raw, ['Roll Number', 'Roll No']),
+      rollNoRaw,
+      rollNo: extractRollNumberDigits(rollNoRaw),
       paperCode: getOmrValue(raw, ['Paper Code']),
       checkedFile: getOmrValue(raw, ['Checked File']),
       physicsMarks: parseOmrNumber(getOmrValue(raw, ['Physics'])),
@@ -7806,7 +7819,10 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       }
       if (!rollKey) {
         report.failed += 1;
-        report.details.push({ row: row.rowNumber, file: row.checkedFile, status: 'failed', reason: 'Roll Number is blank' });
+        const reason = row.rollNoRaw
+          ? `Could not extract a roll number from Roll Number value "${row.rollNoRaw}" (no digits found)`
+          : 'Roll Number is blank';
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNoRaw || '-', file: row.checkedFile, status: 'invalid_roll_number', reason });
         continue;
       }
       if (seenRollKeys.has(rollKey)) {
@@ -7825,10 +7841,26 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
         continue;
       }
 
-      const student = await get(
+      let student = await get(
         `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?`,
         [coachingId, branchId, row.rollNo]
       );
+      if (!student) {
+        // Numeric-equivalent fallback: a normalized OCR value like "00075" should
+        // still match a stored roll number of "75" (or vice versa). Only applied
+        // when it resolves to exactly one student, so it never silently guesses
+        // between two real, differently-padded roll numbers.
+        const numericMatches = await all(
+          `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+           FROM users
+           WHERE coaching_id = ? AND branch_id = ? AND role = 'student'
+             AND roll_no ~ '^0*[0-9]+$' AND LTRIM(roll_no, '0') = LTRIM(?, '0')`,
+          [coachingId, branchId, row.rollNo]
+        );
+        if (numericMatches.length === 1) {
+          student = numericMatches[0];
+        }
+      }
       if (!student) {
         report.missingStudent += 1;
         report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'missing_student', reason: `No student found for roll number "${row.rollNo}"` });
