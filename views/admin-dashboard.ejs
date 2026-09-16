@@ -951,7 +951,7 @@
                   <p><code>101_78_100.pdf</code> save 78/100</p>
                   <p>Or attach a Results Excel (.xlsx) below to assign strictly by an exact <code>Checked File</code> filename match instead of the filename rules above.</p>
                 </div>
-                <form method="post" action="<%= appendCsrfToUrl('/admin/upload-papers') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                <form id="bulk-paper-upload-form" method="post" action="<%= appendCsrfToUrl('/admin/upload-papers') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <div class="ops2-field full"><label>Select Files</label><input type="file" name="papers" multiple required /></div>
                   <div class="ops2-field full"><label>Results Excel (optional)</label><input type="file" name="resultsExcel" accept=".xlsx" /></div>
@@ -959,10 +959,28 @@
                     <p>Optional Excel columns: <code>Student</code>, <code>Roll Number</code>, <code>Paper Code</code>, <code>Physics</code>, <code>Chemistry</code>, <code>Biology</code>, <code>Total Score</code>, <code>Correct</code>, <code>Wrong</code>, <code>Blank</code>, <code>Multi-marked</code>, <code>Checked File</code>.</p>
                     <p>Each row's <code>Checked File</code> value must exactly match one of the uploaded filenames above. Unmatched files, unmatched roll numbers, blank filenames, and duplicates are reported after import and never stop the rest of the batch.</p>
                   </div>
+                  <div class="ops2-field full" id="bulk-paper-progress" hidden>
+                    <div class="bpp-bar"><div class="bpp-bar__fill" id="bpp-fill" style="width:0%"></div></div>
+                    <div class="bpp-stats">
+                      <span id="bpp-percent">0%</span>
+                      <span id="bpp-counts">0 / 0 assigned</span>
+                      <span id="bpp-remaining">Remaining: 0</span>
+                      <span id="bpp-elapsed">Elapsed: 0s</span>
+                      <span id="bpp-eta">Est. remaining: --</span>
+                    </div>
+                    <p class="bpp-final" id="bpp-final" hidden></p>
+                  </div>
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload and Assign</button></div>
                 </form>
               </section>
             </section>
+
+            <style>
+              .bpp-bar { width: 100%; height: 10px; border-radius: 999px; background: rgba(127,127,127,0.25); overflow: hidden; }
+              .bpp-bar__fill { height: 100%; width: 0%; background: #3aa876; transition: width 0.25s ease; }
+              .bpp-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; font-size: 0.85em; opacity: 0.85; }
+              .bpp-final { margin-top: 8px; font-weight: 600; }
+            </style>
 
             <section class="ops2-panel" id="omr-import-panel">
               <div class="ops2-panel__header">
@@ -1426,6 +1444,126 @@
         });
       });
     });
+
+    // Bulk paper upload progress: reuses the exact same /admin/upload-papers
+    // route and assignment logic. The only difference from a normal form POST
+    // is the X-Progress-Stream header, which makes the server stream newline-
+    // delimited JSON progress events instead of redirecting once at the end.
+    (function setupBulkPaperProgress() {
+      const form = document.getElementById('bulk-paper-upload-form');
+      if (!form || typeof fetch !== 'function' || !window.ReadableStream) return;
+
+      const wrap = document.getElementById('bulk-paper-progress');
+      const fill = document.getElementById('bpp-fill');
+      const percentEl = document.getElementById('bpp-percent');
+      const countsEl = document.getElementById('bpp-counts');
+      const remainingEl = document.getElementById('bpp-remaining');
+      const elapsedEl = document.getElementById('bpp-elapsed');
+      const etaEl = document.getElementById('bpp-eta');
+      const finalEl = document.getElementById('bpp-final');
+
+      function formatSeconds(ms) {
+        const totalSeconds = Math.max(0, Math.round(ms / 1000));
+        if (totalSeconds < 60) return `${totalSeconds}s`;
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${minutes}m ${seconds}s`;
+      }
+
+      function resetPanel(total) {
+        wrap.hidden = false;
+        finalEl.hidden = true;
+        finalEl.textContent = '';
+        fill.style.width = '0%';
+        percentEl.textContent = '0%';
+        countsEl.textContent = `0 / ${total || 0} assigned`;
+        remainingEl.textContent = `Remaining: ${total || 0}`;
+        etaEl.textContent = 'Est. remaining: --';
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const submitButton = form.querySelector('button[type="submit"]');
+        const startedAt = Date.now();
+        let total = 0;
+        let elapsedTimer = null;
+
+        resetPanel(0);
+        elapsedEl.textContent = 'Elapsed: 0s';
+        elapsedTimer = window.setInterval(() => {
+          elapsedEl.textContent = `Elapsed: ${formatSeconds(Date.now() - startedAt)}`;
+        }, 500);
+
+        function stop() {
+          if (elapsedTimer) window.clearInterval(elapsedTimer);
+          if (submitButton) {
+            submitButton.disabled = false;
+            submitButton.textContent = submitButton.dataset.originalText || 'Upload and Assign';
+          }
+        }
+
+        try {
+          const response = await fetch(form.action, {
+            method: 'POST',
+            body: new FormData(form),
+            headers: { 'X-Progress-Stream': '1' },
+          });
+          if (!response.ok || !response.body) throw new Error(`Upload failed (status ${response.status})`);
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              let event;
+              try { event = JSON.parse(line); } catch (parseError) { continue; }
+
+              if (event.type === 'start') {
+                total = event.total || 0;
+                resetPanel(total);
+              } else if (event.type === 'progress') {
+                total = event.total || total;
+                const index = event.index || 0;
+                const assigned = event.assigned || 0;
+                const percent = total ? Math.round((index / total) * 100) : 0;
+                fill.style.width = `${percent}%`;
+                percentEl.textContent = `${percent}%`;
+                countsEl.textContent = `${assigned} / ${total} assigned`;
+                remainingEl.textContent = `Remaining: ${Math.max(0, total - index)}`;
+                const elapsedMs = Date.now() - startedAt;
+                elapsedEl.textContent = `Elapsed: ${formatSeconds(elapsedMs)}`;
+                if (index > 0 && index < total) {
+                  const etaMs = (elapsedMs / index) * (total - index);
+                  etaEl.textContent = `Est. remaining: ${formatSeconds(etaMs)}`;
+                } else {
+                  etaEl.textContent = 'Est. remaining: --';
+                }
+              } else if (event.type === 'done') {
+                fill.style.width = '100%';
+                percentEl.textContent = '100%';
+                finalEl.hidden = false;
+                finalEl.textContent = event.message
+                  || (event.ok ? `Done. Assigned ${event.assigned || 0} of ${event.total || 0} papers.` : 'Upload failed.');
+                etaEl.textContent = 'Est. remaining: --';
+              }
+            }
+          }
+        } catch (error) {
+          finalEl.hidden = false;
+          finalEl.textContent = `Upload failed: ${error.message || 'network error'}`;
+        } finally {
+          stop();
+          window.setTimeout(() => window.location.reload(), 1500);
+        }
+      });
+    })();
 
     document.querySelectorAll('[data-student-picker]').forEach((input) => {
       const pickerKey = input.dataset.studentPicker;

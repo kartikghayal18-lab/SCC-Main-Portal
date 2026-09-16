@@ -7721,7 +7721,26 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
   const files = req.files?.papers || [];
   const excelFile = (req.files?.resultsExcel || [])[0] || null;
 
+  // Progressive enhancement only: a plain <form> POST (no JS, or JS disabled) gets
+  // the exact original behaviour below — process everything, then res.redirect().
+  // A client that opts in via this header instead gets newline-delimited JSON
+  // progress events streamed as each paper is processed, ending with a "done"
+  // event carrying the same totals used to build the flash message.
+  const wantsProgress = req.get('X-Progress-Stream') === '1';
+  const sendProgress = (event) => {
+    if (!wantsProgress) return;
+    res.write(`${JSON.stringify(event)}\n`);
+  };
+  if (wantsProgress) {
+    res.setHeader('Content-Type', 'application/x-ndjson');
+    res.setHeader('Cache-Control', 'no-cache');
+  }
+
   if (!files.length) {
+    if (wantsProgress) {
+      res.write(`${JSON.stringify({ type: 'done', ok: false, message: 'No files uploaded' })}\n`);
+      return res.end();
+    }
     req.session.flash = { type: 'error', text: 'No files uploaded' };
     return res.redirect('/admin/dashboard?section=papers');
   }
@@ -7747,9 +7766,15 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       excelRows = toBulkPaperExcelRows(excelFile.buffer);
     } catch (error) {
       console.error('[BULK PAPER UPLOAD] Excel parse failed', { fileName: excelFile.originalname, error: error.message });
+      if (wantsProgress) {
+        res.write(`${JSON.stringify({ type: 'done', ok: false, message: `Could not parse results Excel file: ${error.message}` })}\n`);
+        return res.end();
+      }
       req.session.flash = { type: 'error', text: `Could not parse results Excel file: ${error.message}` };
       return res.redirect('/admin/dashboard?section=papers');
     }
+
+    sendProgress({ type: 'start', total: excelRows.length });
 
     const uploadedFilesByName = new Map();
     const duplicateUploadedFilenames = new Set();
@@ -7765,6 +7790,12 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
     const seenCheckedFiles = new Set();
 
     for (const row of excelRows) {
+      // try/finally wraps the existing per-row logic completely unchanged (every
+      // classification branch below still does exactly what it did before) —
+      // it only guarantees one progress event is emitted per row, on every exit
+      // path (success, any "continue", or an unexpected throw), without having
+      // to duplicate the progress call at each of those exit points individually.
+      try {
       report.totalRows += 1;
       const rollKey = String(row.rollNo || '').trim().toLowerCase();
 
@@ -7870,6 +7901,15 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
           console.error('[BULK PAPER UPLOAD] WhatsApp notify threw unexpectedly', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, error: notifyErr.message });
         }
       }
+      } finally {
+        sendProgress({
+          type: 'progress',
+          total: excelRows.length,
+          index: report.totalRows,
+          assigned: report.imported,
+          failed: report.failed + report.missingStudent + report.missingFile + report.invalidFilename + report.duplicateMapping,
+        });
+      }
     }
 
     const unmatchedFiles = files
@@ -7891,12 +7931,28 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       targetType: 'paper_batch',
       details: { ...report, unmatchedFiles },
     });
+    if (wantsProgress) {
+      res.write(`${JSON.stringify({
+        type: 'done',
+        ok: true,
+        total: report.totalRows,
+        assigned: report.imported,
+        message: req.session.flash.text,
+      })}\n`);
+      return res.end();
+    }
     return res.redirect('/admin/dashboard?section=papers');
   }
 
+  sendProgress({ type: 'start', total: files.length });
   const report = { assigned: 0, skipped: 0, failed: 0, duplicates: 0, details: [] };
 
+  let processedFiles = 0;
   for (const file of files) {
+    // Same try/finally pattern as the Excel-driven branch above: existing
+    // classification logic below is untouched, this only guarantees exactly
+    // one progress event per file regardless of which branch it took.
+    try {
     const paperMeta = parsePaperMetaFromFileName(file.originalname);
     if (!String(paperMeta.rollNo || '').trim()) {
       report.failed += 1;
@@ -7969,6 +8025,10 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
         error: notifyErr.message,
       });
     }
+    } finally {
+      processedFiles += 1;
+      sendProgress({ type: 'progress', total: files.length, index: processedFiles, assigned: report.assigned, failed: report.failed + report.skipped });
+    }
   }
 
   req.session.flash = {
@@ -7980,6 +8040,10 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
     targetType: 'paper_batch',
     details: report,
   });
+  if (wantsProgress) {
+    res.write(`${JSON.stringify({ type: 'done', ok: true, total: files.length, assigned: report.assigned, message: req.session.flash.text })}\n`);
+    return res.end();
+  }
   return res.redirect('/admin/dashboard?section=papers');
 });
 
