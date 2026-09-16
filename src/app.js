@@ -20,6 +20,7 @@ const {
   getRecentWhatsAppLogs,
   resendWhatsAppLog,
   updateWhatsAppLogStatus,
+  logWhatsAppMessage,
   sendDocumentMessage,
   sendTemplateMessage,
   sendTextMessage,
@@ -300,12 +301,38 @@ function getExactSheetRollNo(fileName) {
   return path.parse(fileName || '').name.trim();
 }
 
-function toOmrTableRows(fileBuffer, fallbackMaxMarks) {
-  const csvRows = parseCsvRows(fileBuffer);
-  const headers = csvRows.shift() || [];
-  if (!headers.length) throw new Error('CSV header row is missing');
+const REQUIRED_RESULT_EXCEL_COLUMNS = [
+  { label: 'Roll No', aliases: ['Roll No', 'RollNumber', 'Roll Number', 'Roll'] },
+  { label: 'Student Name', aliases: ['Student Name', 'Name'] },
+  { label: 'Physics Marks', aliases: ['Physics Marks', 'Physics'] },
+  { label: 'Chemistry Marks', aliases: ['Chemistry Marks', 'Chemistry'] },
+  { label: 'Biology Marks', aliases: ['Biology Marks', 'Biology'] },
+  { label: 'Total Marks', aliases: ['Total Marks', 'Correct Marks Total', 'Total Marks Total', 'Obtained Marks', 'Marks Obtained'] },
+];
+
+function validateResultExcelColumns(normalizedHeaders) {
+  const headerSet = new Set(normalizedHeaders.filter(Boolean));
+  const missing = REQUIRED_RESULT_EXCEL_COLUMNS.filter(
+    (column) => !column.aliases.some((alias) => headerSet.has(normalizeOmrHeader(alias)))
+  );
+  if (missing.length) {
+    throw new Error(`Missing required column(s): ${missing.map((column) => column.label).join(', ')}. Required columns: Roll No, Student Name, Physics Marks, Chemistry Marks, Biology Marks, Total Marks.`);
+  }
+}
+
+function toOmrTableRows(fileBuffer, fallbackMaxMarks, fileName = '') {
+  const isXlsx = /\.xlsx$/i.test(fileName || '');
+  const sheetRows = isXlsx ? parseXlsxRows(fileBuffer) : parseCsvRows(fileBuffer);
+  const headers = sheetRows.shift() || [];
+  if (!headers.length) throw new Error(`${isXlsx ? 'Excel' : 'CSV'} header row is missing`);
   const normalizedHeaders = headers.map(normalizeOmrHeader);
-  return csvRows.map((cells, index) => {
+  validateResultExcelColumns(normalizedHeaders);
+
+  const nonBlankRows = sheetRows.filter(
+    (cells) => Array.isArray(cells) && cells.some((cell) => String(cell || '').trim() !== '')
+  );
+
+  return nonBlankRows.map((cells, index) => {
     const raw = {};
     normalizedHeaders.forEach((header, cellIndex) => {
       raw[header] = cells[cellIndex] || '';
@@ -313,6 +340,59 @@ function toOmrTableRows(fileBuffer, fallbackMaxMarks) {
     return {
       rowNumber: index + 2,
       ...normalizeOmrRow(raw, fallbackMaxMarks),
+    };
+  });
+}
+
+const REQUIRED_BULK_PAPER_EXCEL_COLUMNS = [
+  { label: 'Roll Number', aliases: ['Roll Number', 'Roll No'] },
+  { label: 'Checked File', aliases: ['Checked File'] },
+];
+
+function validateBulkPaperExcelColumns(normalizedHeaders) {
+  const headerSet = new Set(normalizedHeaders.filter(Boolean));
+  const missing = REQUIRED_BULK_PAPER_EXCEL_COLUMNS.filter(
+    (column) => !column.aliases.some((alias) => headerSet.has(normalizeOmrHeader(alias)))
+  );
+  if (missing.length) {
+    throw new Error(`Missing required column(s): ${missing.map((column) => column.label).join(', ')}. Required columns: Student, Roll Number, Paper Code, Physics, Chemistry, Biology, Total Score, Correct, Wrong, Blank, Multi-marked, Checked File.`);
+  }
+}
+
+// Roll Number and Checked File are read as raw trimmed strings on purpose (never
+// through parseOmrNumber) — the source Excel can contain leading zeros, stray
+// question marks, or other formatting artifacts in those two columns, and turning
+// them into numbers would silently corrupt the exact-match keys this import relies on.
+function toBulkPaperExcelRows(fileBuffer) {
+  const sheetRows = parseXlsxRows(fileBuffer);
+  const headers = sheetRows.shift() || [];
+  if (!headers.length) throw new Error('Excel header row is missing');
+  const normalizedHeaders = headers.map(normalizeOmrHeader);
+  validateBulkPaperExcelColumns(normalizedHeaders);
+
+  const nonBlankRows = sheetRows.filter(
+    (cells) => Array.isArray(cells) && cells.some((cell) => String(cell || '').trim() !== '')
+  );
+
+  return nonBlankRows.map((cells, index) => {
+    const raw = {};
+    normalizedHeaders.forEach((header, cellIndex) => {
+      raw[header] = cells[cellIndex] !== undefined ? cells[cellIndex] : '';
+    });
+    return {
+      rowNumber: index + 2,
+      studentName: getOmrValue(raw, ['Student']),
+      rollNo: getOmrValue(raw, ['Roll Number', 'Roll No']),
+      paperCode: getOmrValue(raw, ['Paper Code']),
+      checkedFile: getOmrValue(raw, ['Checked File']),
+      physicsMarks: parseOmrNumber(getOmrValue(raw, ['Physics'])),
+      chemistryMarks: parseOmrNumber(getOmrValue(raw, ['Chemistry'])),
+      biologyMarks: parseOmrNumber(getOmrValue(raw, ['Biology'])),
+      totalScore: parseOmrNumber(getOmrValue(raw, ['Total Score'])),
+      correctCount: parseOmrNumber(getOmrValue(raw, ['Correct'])),
+      wrongCount: parseOmrNumber(getOmrValue(raw, ['Wrong'])),
+      blankCount: parseOmrNumber(getOmrValue(raw, ['Blank'])),
+      multiMarkedCount: parseOmrNumber(getOmrValue(raw, ['Multi-marked', 'Multi Marked', 'MultiMarked'])),
     };
   });
 }
@@ -357,6 +437,7 @@ async function ensureOmrSchema() {
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_scan_path TEXT`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_scan_original_name TEXT`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_scan_uploaded_at TIMESTAMPTZ`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS multi_marked_count INTEGER`);
   await run(`
     CREATE TABLE IF NOT EXISTS omr_imports (
       id SERIAL PRIMARY KEY,
@@ -467,6 +548,10 @@ const omrUpload = multer({
 const omrImportUpload = omrUpload.fields([
   { name: 'omrCsv', maxCount: 1 },
   { name: 'answerSheets', maxCount: 200 },
+]);
+const bulkPaperUploadFields = omrUpload.fields([
+  { name: 'papers', maxCount: 100 },
+  { name: 'resultsExcel', maxCount: 1 },
 ]);
 
 app.disable('x-powered-by');
@@ -1096,18 +1181,25 @@ function isReEngagementError(resultOrError) {
   return code === '131047' || message.includes('131047') || message.includes('re-engagement');
 }
 
-function buildPaperTemplateComponents({ recipientName, student, paper, paperUrl }) {
-  return [{
-    type: 'body',
-    parameters: [
-      { type: 'text', text: recipientName || student.name || student.roll_no || 'Parent' },
-      { type: 'text', text: student.name || student.roll_no || 'Student' },
-      { type: 'text', text: paper.test_label || paper.original_name || 'Test Paper' },
-      { type: 'text', text: String(paper.marks_obtained ?? '-') },
-      { type: 'text', text: String(paper.max_marks ?? '-') },
-      { type: 'text', text: paperUrl },
-    ],
-  }];
+function buildPaperTemplateComponents({ recipientName, student, paper, paperUrl, fileName }) {
+  return [
+    {
+      type: 'header',
+      parameters: [
+        { type: 'document', document: { link: paperUrl, filename: fileName || paper.original_name || 'paper.pdf' } },
+      ],
+    },
+    {
+      type: 'body',
+      parameters: [
+        { type: 'text', text: recipientName || student.name || student.roll_no || 'Parent' },
+        { type: 'text', text: student.name || student.roll_no || 'Student' },
+        { type: 'text', text: paper.test_label || paper.original_name || 'Test Paper' },
+        { type: 'text', text: String(paper.marks_obtained ?? '-') },
+        { type: 'text', text: String(paper.max_marks ?? '-') },
+      ],
+    },
+  ];
 }
 
 async function sendPaperTemplateFallback({ coachingId, branchId, student, recipient, document, paperId }) {
@@ -1138,6 +1230,7 @@ async function sendPaperTemplateFallback({ coachingId, branchId, student, recipi
       student,
       paper: document.paper,
       paperUrl: document.fileUrl,
+      fileName: document.fileName,
     }),
   });
 
@@ -1161,6 +1254,51 @@ async function sendPaperTemplateFallback({ coachingId, branchId, student, recipi
   return result;
 }
 
+async function retryFailedPaperDocumentAsTemplate(metaMessageId) {
+  const log = await get(
+    `SELECT id, coaching_id, branch_id, student_id, phone_number, message_type, document_url, document_filename, retry_count
+     FROM whatsapp_logs
+     WHERE meta_message_id = ?
+     LIMIT 1`,
+    [metaMessageId]
+  );
+  if (!log || log.message_type !== 'document' || !log.document_url || Number(log.retry_count) > 0) {
+    return;
+  }
+
+  const student = await get(
+    `SELECT id, name, roll_no, parent_name, branch_id FROM users WHERE id = ?`,
+    [log.student_id]
+  );
+  const paper = await get(
+    `SELECT id, test_label, original_name, marks_obtained, max_marks
+     FROM test_papers
+     WHERE public_url = ?
+     LIMIT 1`,
+    [log.document_url]
+  );
+  if (!student || !paper) {
+    console.error('[PAPER WHATSAPP TEMPLATE RETRY] skipped: missing student or paper', {
+      metaMessageId,
+      studentId: log.student_id,
+      hasStudent: Boolean(student),
+      hasPaper: Boolean(paper),
+    });
+    return;
+  }
+
+  await run(`UPDATE whatsapp_logs SET retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?`, [log.id]);
+
+  await sendPaperTemplateFallback({
+    coachingId: log.coaching_id,
+    branchId: log.branch_id || student.branch_id,
+    student,
+    recipient: { key: 'async-retry', phone: log.phone_number },
+    document: { paper, fileUrl: log.document_url, fileName: log.document_filename },
+    paperId: paper.id,
+  });
+}
+
 async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
   try {
     console.log('[WHATSAPP PAPER] upload hook start', {
@@ -1173,6 +1311,19 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
     const document = await getPaperDocumentUrl(req, paperId, student.id);
     if (!document?.paper) {
       console.log('[WHATSAPP PAPER] skipped: real S3 paper not found', { studentId: student.id, paperId, type });
+      const fallbackPhone = student.whatsapp_number || student.contact_phone || student.parent_whatsapp_number || student.guardian_phone || '';
+      if (fallbackPhone) {
+        await logWhatsAppMessage({
+          coachingId: coaching?.coaching_id || student.coaching_id || null,
+          branchId: student.branch_id || null,
+          studentId: student.id,
+          phoneNumber: fallbackPhone,
+          messageType: 'document',
+          messageContent: `Paper notification for ${student.name || student.roll_no || 'student'}`,
+          status: 'failed',
+          lastError: 'Missing document URL: no uploaded paper file found for this student in storage',
+        });
+      }
       return { ok: false, skipped: true, reason: 'Real S3 paper not found' };
     }
 
@@ -1187,6 +1338,34 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       studentId: paperStudent.id,
       paperId,
     });
+    if (!studentPhone) {
+      await logWhatsAppMessage({
+        coachingId: document.paper.coaching_id || student.coaching_id || null,
+        branchId: paperStudent.branch_id || student.branch_id || null,
+        studentId: paperStudent.id,
+        phoneNumber: '',
+        messageType: 'document',
+        messageContent: document.fileName || 'paper.pdf',
+        status: 'failed',
+        documentUrl: document.fileUrl,
+        documentFilename: document.fileName,
+        lastError: 'Missing/invalid phone number: student has no WhatsApp or contact number on file',
+      });
+    }
+    if (!parentPhone) {
+      await logWhatsAppMessage({
+        coachingId: document.paper.coaching_id || student.coaching_id || null,
+        branchId: paperStudent.branch_id || student.branch_id || null,
+        studentId: paperStudent.id,
+        phoneNumber: '',
+        messageType: 'document',
+        messageContent: document.fileName || 'paper.pdf',
+        status: 'failed',
+        documentUrl: document.fileUrl,
+        documentFilename: document.fileName,
+        lastError: 'Missing/invalid phone number: no parent/guardian WhatsApp number on file',
+      });
+    }
     const subject = document.paper?.test_label || document.paper?.original_name || 'Result';
     const resultPercentage = isResult && Number(document.paper?.max_marks) > 0
       ? formatWhatsAppPercent((Number(document.paper?.marks_obtained || 0) / Number(document.paper.max_marks)) * 100)
@@ -1988,7 +2167,7 @@ app.use((req, res, next) => {
     if (req.method === 'POST' && isOmrImportResultsPostPath(req)) {
       req.session.flash = {
         type: 'error',
-        text: 'Your OMR import page expired. Please try uploading the CSV again.',
+        text: 'Your OMR import page expired. Please try uploading the Excel file again.',
       };
       return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
     }
@@ -3048,6 +3227,14 @@ async function savePaperUpload({
   marksObtained,
   maxMarks,
   answerRequestId = null,
+  physicsMarks = null,
+  chemistryMarks = null,
+  biologyMarks = null,
+  correctCount = null,
+  wrongCount = null,
+  blankCount = null,
+  multiMarkedCount = null,
+  paperCode = null,
 }) {
   const duplicate = await findRecentDuplicatePaper({
     coachingId,
@@ -3119,8 +3306,10 @@ async function savePaperUpload({
     `INSERT INTO test_papers (
       coaching_id, branch_id, student_id, original_name, stored_name, uploaded_by,
       storage_type, storage_key, public_url, content_type, size_bytes,
-      marks_obtained, max_marks, test_label, paper_type, answer_request_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      marks_obtained, max_marks, test_label, paper_type, answer_request_id,
+      physics_marks, chemistry_marks, biology_marks, correct_count, wrong_count,
+      unattempted_count, multi_marked_count, omr_barcode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       branchId,
@@ -3138,6 +3327,14 @@ async function savePaperUpload({
       testLabel || file.originalname,
       answerRequestId !== null ? 'answer_submission' : 'general',
       answerRequestId,
+      physicsMarks,
+      chemistryMarks,
+      biologyMarks,
+      correctCount,
+      wrongCount,
+      blankCount,
+      multiMarkedCount,
+      paperCode,
     ]
   );
 
@@ -4663,6 +4860,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
         for (const statusEvent of statuses) {
           try {
             await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status, statusEvent.errors);
+            if (statusEvent.status === 'failed' && isReEngagementError({ errorCode: statusEvent.errors?.[0]?.code, error: statusEvent.errors?.[0]?.message || statusEvent.errors?.[0]?.title })) {
+              await retryFailedPaperDocumentAsTemplate(statusEvent.id);
+            }
           } catch (error) {
             console.error('[WHATSAPP BOT ERROR]', error);
           }
@@ -7514,14 +7714,183 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
   return res.redirect('/admin/dashboard?section=papers');
 });
 
-app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 100), async (req, res) => {
+app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
-  const files = req.files || [];
+  const files = req.files?.papers || [];
+  const excelFile = (req.files?.resultsExcel || [])[0] || null;
 
   if (!files.length) {
     req.session.flash = { type: 'error', text: 'No files uploaded' };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+
+  // Excel-driven mode: admin attached a Checked-File summary workbook, so every
+  // uploaded paper is matched to a student by exact "Checked File" filename, never
+  // by upload order/index/timestamp. Without an Excel file, fall back unchanged to
+  // the original filename-parsing bulk path below (existing behaviour preserved).
+  if (excelFile) {
+    const report = {
+      totalRows: 0,
+      imported: 0,
+      missingStudent: 0,
+      missingFile: 0,
+      invalidFilename: 0,
+      duplicateMapping: 0,
+      failed: 0,
+      details: [],
+    };
+
+    let excelRows;
+    try {
+      excelRows = toBulkPaperExcelRows(excelFile.buffer);
+    } catch (error) {
+      console.error('[BULK PAPER UPLOAD] Excel parse failed', { fileName: excelFile.originalname, error: error.message });
+      req.session.flash = { type: 'error', text: `Could not parse results Excel file: ${error.message}` };
+      return res.redirect('/admin/dashboard?section=papers');
+    }
+
+    const uploadedFilesByName = new Map();
+    const duplicateUploadedFilenames = new Set();
+    for (const file of files) {
+      if (uploadedFilesByName.has(file.originalname)) {
+        duplicateUploadedFilenames.add(file.originalname);
+      } else {
+        uploadedFilesByName.set(file.originalname, file);
+      }
+    }
+
+    const seenRollKeys = new Set();
+    const seenCheckedFiles = new Set();
+
+    for (const row of excelRows) {
+      report.totalRows += 1;
+      const rollKey = String(row.rollNo || '').trim().toLowerCase();
+
+      if (!row.checkedFile) {
+        report.invalidFilename += 1;
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNo || '-', file: '(blank)', status: 'invalid_filename', reason: 'Checked File value is blank' });
+        continue;
+      }
+      if (!rollKey) {
+        report.failed += 1;
+        report.details.push({ row: row.rowNumber, file: row.checkedFile, status: 'failed', reason: 'Roll Number is blank' });
+        continue;
+      }
+      if (seenRollKeys.has(rollKey)) {
+        report.duplicateMapping += 1;
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Duplicate Roll Number "${row.rollNo}" in Excel; only the first occurrence is imported` });
+        continue;
+      }
+      if (seenCheckedFiles.has(row.checkedFile)) {
+        report.duplicateMapping += 1;
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Duplicate Checked File "${row.checkedFile}" reference in Excel; only the first occurrence is imported` });
+        continue;
+      }
+      if (duplicateUploadedFilenames.has(row.checkedFile)) {
+        report.duplicateMapping += 1;
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Multiple uploaded files share the filename "${row.checkedFile}"; cannot determine which one to use` });
+        continue;
+      }
+
+      const student = await get(
+        `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?`,
+        [coachingId, branchId, row.rollNo]
+      );
+      if (!student) {
+        report.missingStudent += 1;
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'missing_student', reason: `No student found for roll number "${row.rollNo}"` });
+        continue;
+      }
+
+      const file = uploadedFilesByName.get(row.checkedFile);
+      if (!file) {
+        report.missingFile += 1;
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'missing_file', reason: `No uploaded file matches Checked File "${row.checkedFile}"` });
+        continue;
+      }
+
+      seenRollKeys.add(rollKey);
+      seenCheckedFiles.add(row.checkedFile);
+
+      let uploadResult = null;
+      try {
+        uploadResult = await savePaperUpload({
+          coachingId,
+          branchId,
+          studentId: student.id,
+          file,
+          uploadedBy: req.session.user.id,
+          testLabel: row.paperCode || file.originalname,
+          marksObtained: row.totalScore,
+          maxMarks: null,
+          answerRequestId: null,
+          physicsMarks: row.physicsMarks,
+          chemistryMarks: row.chemistryMarks,
+          biologyMarks: row.biologyMarks,
+          correctCount: row.correctCount,
+          wrongCount: row.wrongCount,
+          blankCount: row.blankCount,
+          multiMarkedCount: row.multiMarkedCount,
+          paperCode: row.paperCode || null,
+        });
+      } catch (err) {
+        console.error('[BULK PAPER UPLOAD] Excel row save failed', { row: row.rowNumber, file: row.checkedFile, rollNo: row.rollNo, error: err.message });
+        report.failed += 1;
+        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'failed', reason: err.message || 'Upload failed while saving file' });
+        continue;
+      }
+
+      report.imported += 1;
+      report.details.push({
+        row: row.rowNumber,
+        rollNo: row.rollNo,
+        file: row.checkedFile,
+        status: uploadResult.status === 'duplicate' ? 'duplicate_recent_upload' : 'imported',
+        reason: uploadResult.status === 'duplicate'
+          ? `Duplicate click ignored for roll number "${row.rollNo}" (already imported moments ago)`
+          : `Assigned to roll number "${row.rollNo}"`,
+      });
+
+      if (uploadResult.status !== 'duplicate') {
+        // WhatsApp notification is intentionally isolated from the upload try/catch
+        // above: a notification failure for this recipient must never be counted as
+        // an upload failure, and must never stop the remaining rows from processing.
+        try {
+          const notifyResult = await notifyPaperEvent({
+            req,
+            coaching,
+            student,
+            paperId: uploadResult.paperId,
+            type: row.totalScore !== null ? 'test_result_published' : 'test_paper_upload',
+          });
+          console.log('[BULK PAPER UPLOAD] WhatsApp notify result', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, result: notifyResult });
+        } catch (notifyErr) {
+          console.error('[BULK PAPER UPLOAD] WhatsApp notify threw unexpectedly', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, error: notifyErr.message });
+        }
+      }
+    }
+
+    const unmatchedFiles = files
+      .map((file) => file.originalname)
+      .filter((name) => !seenCheckedFiles.has(name));
+    if (unmatchedFiles.length) {
+      console.error('[BULK PAPER UPLOAD] uploaded files with no matching Excel row', { unmatchedFiles });
+    }
+
+    req.session.flash = {
+      type: report.missingStudent || report.missingFile || report.invalidFilename || report.duplicateMapping || report.failed || unmatchedFiles.length ? 'warning' : 'success',
+      text: `Bulk paper import complete. Total rows: ${report.totalRows}, Imported: ${report.imported}, Missing student: ${report.missingStudent}, Missing file: ${report.missingFile}, Invalid filename: ${report.invalidFilename}, Duplicate mapping: ${report.duplicateMapping}, Failed: ${report.failed}, Unmatched files: ${unmatchedFiles.length}`,
+      details: [
+        ...report.details.filter((item) => item.status !== 'imported').slice(0, 20),
+        ...unmatchedFiles.map((name) => ({ file: name, status: 'unmatched_file', reason: 'Uploaded file was not referenced by any Excel row' })),
+      ].slice(0, 30),
+    };
+    await auditActor(req, 'paper_uploaded_bulk_excel', {
+      targetType: 'paper_batch',
+      details: { ...report, unmatchedFiles },
+    });
     return res.redirect('/admin/dashboard?section=papers');
   }
 
@@ -7546,8 +7915,9 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
       continue;
     }
 
+    let uploadResult = null;
     try {
-      const result = await savePaperUpload({
+      uploadResult = await savePaperUpload({
         coachingId,
         branchId,
         studentId: student.id,
@@ -7558,25 +7928,46 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
         maxMarks: paperMeta.maxMarks,
         answerRequestId: null,
       });
-
-      if (result.status === 'duplicate') {
-        report.duplicates += 1;
-        report.details.push({ file: file.originalname, reason: `Duplicate ignored for roll number "${paperMeta.rollNo}"` });
-      } else {
-        report.assigned += 1;
-        report.details.push({ file: file.originalname, reason: `Assigned to roll number "${paperMeta.rollNo}"` });
-        await notifyPaperEvent({
-          req,
-          coaching,
-          student,
-          paperId: result.paperId,
-          type: paperMeta.marksObtained !== null && paperMeta.maxMarks !== null ? 'test_result_published' : 'test_paper_upload',
-        });
-      }
     } catch (err) {
-      console.error('Upload failed for', file.originalname, err);
+      console.error('[BULK PAPER UPLOAD] file save failed', { file: file.originalname, error: err.message });
       report.failed += 1;
       report.details.push({ file: file.originalname, reason: err.message || 'Upload failed while saving file' });
+      continue;
+    }
+
+    if (uploadResult.status === 'duplicate') {
+      report.duplicates += 1;
+      report.details.push({ file: file.originalname, reason: `Duplicate ignored for roll number "${paperMeta.rollNo}"` });
+      continue;
+    }
+
+    report.assigned += 1;
+    report.details.push({ file: file.originalname, reason: `Assigned to roll number "${paperMeta.rollNo}"` });
+
+    // WhatsApp notification is intentionally isolated from the upload try/catch above:
+    // a notification failure for this recipient must never be counted as an upload
+    // failure, and must never stop the remaining files in this batch from processing.
+    try {
+      const notifyResult = await notifyPaperEvent({
+        req,
+        coaching,
+        student,
+        paperId: uploadResult.paperId,
+        type: paperMeta.marksObtained !== null && paperMeta.maxMarks !== null ? 'test_result_published' : 'test_paper_upload',
+      });
+      console.log('[BULK PAPER UPLOAD] WhatsApp notify result', {
+        file: file.originalname,
+        rollNo: paperMeta.rollNo,
+        studentId: student.id,
+        result: notifyResult,
+      });
+    } catch (notifyErr) {
+      console.error('[BULK PAPER UPLOAD] WhatsApp notify threw unexpectedly', {
+        file: file.originalname,
+        rollNo: paperMeta.rollNo,
+        studentId: student.id,
+        error: notifyErr.message,
+      });
     }
   }
 
@@ -7631,24 +8022,24 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
     req.session.flash = { type: 'error', text: 'Enter valid max marks so graphs and percentages can be generated.' };
     return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
   }
-  if (!csvFile || !/\.csv$/i.test(csvFile.originalname || '')) {
-    req.session.flash = { type: 'error', text: 'Upload one OMR result CSV file.' };
+  if (!csvFile || !/\.xlsx$/i.test(csvFile.originalname || '')) {
+    req.session.flash = { type: 'error', text: 'Upload one Result Excel (.xlsx) file.' };
     return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
   }
 
   let parsedRows;
   try {
-    parsedRows = toOmrTableRows(csvFile.buffer, maxMarks);
+    parsedRows = toOmrTableRows(csvFile.buffer, maxMarks, csvFile.originalname);
   } catch (error) {
-    req.session.flash = { type: 'error', text: `Could not parse OMR CSV: ${error.message}` };
-    console.error('[OMR IMPORT] CSV parse failed', {
+    req.session.flash = { type: 'error', text: `Could not parse Result Excel file: ${error.message}` };
+    console.error('[OMR IMPORT] Excel parse failed', {
       fileName: csvFile.originalname,
       error: error.message,
       stack: error.stack,
     });
     return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
   }
-  console.log('[OMR IMPORT] CSV parsed', {
+  console.log('[OMR IMPORT] Excel parsed', {
     fileName: csvFile.originalname,
     rowCount: parsedRows.length,
     testLabel,
@@ -7662,6 +8053,7 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
     [coachingId, branchId]
   );
   const studentByRoll = new Map(students.map((student) => [String(student.roll_no || '').trim().toLowerCase(), student]));
+  const seenRollKeys = new Set();
   const normalizedRows = parsedRows.map((row) => {
     const rollKey = String(row.rollNo || '').trim().toLowerCase();
     const student = rollKey ? studentByRoll.get(rollKey) : null;
@@ -7674,9 +8066,13 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
       status = 'unmatched';
       error = `Roll No ${row.rollNo} not found`;
     } else if (row.obtainedMarks === null || row.obtainedMarks === undefined) {
-      status = 'skipped';
-      error = 'Missing Total Marks';
+      status = 'invalid';
+      error = 'Missing or invalid Total Marks';
+    } else if (seenRollKeys.has(rollKey)) {
+      status = 'duplicate';
+      error = `Duplicate Roll No ${row.rollNo} in file (first occurrence already imported)`;
     }
+    if (status === 'ready') seenRollKeys.add(rollKey);
     return {
       ...row,
       studentId: student?.id || null,
@@ -7692,10 +8088,12 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
   const scanByRoll = new Map();
   const scanErrors = [...sheetErrors];
   console.log('[OMR IMPORT] rows matched', {
-    parsed: normalizedRows.length,
+    totalRows: normalizedRows.length,
     ready: readyRows.length,
     skipped: normalizedRows.filter((row) => row.status === 'skipped').length,
+    invalid: normalizedRows.filter((row) => row.status === 'invalid').length,
     unmatched: normalizedRows.filter((row) => row.status === 'unmatched').length,
+    duplicate: normalizedRows.filter((row) => row.status === 'duplicate').length,
     uploadedSheetFiles: uploadedSheets.length,
   });
 
@@ -8009,8 +8407,13 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
     console.log('[OMR IMPORT][TX] before build import summary');
     const summary = {
       importId,
+      totalRows: normalizedRows.length,
       imported: readyRows.length,
+      matched: readyRows.length,
+      updated: readyRows.length,
       skipped: normalizedRows.filter((row) => row.status === 'skipped').length,
+      invalidRows: normalizedRows.filter((row) => row.status === 'invalid').length,
+      duplicateRollNumbers: normalizedRows.filter((row) => row.status === 'duplicate').map((row) => row.rollNo),
       unmatchedRollNumbers: normalizedRows.filter((row) => row.status === 'unmatched').map((row) => row.rollNo),
       sheetErrors: scanErrors,
       details,
@@ -8018,8 +8421,11 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
     };
     console.log('[OMR IMPORT][TX] after build import summary', {
       importId: summary.importId,
+      totalRows: summary.totalRows,
       imported: summary.imported,
       skipped: summary.skipped,
+      invalidRows: summary.invalidRows,
+      duplicates: summary.duplicateRollNumbers.length,
       unmatched: summary.unmatchedRollNumbers.length,
       sheetErrors: summary.sheetErrors.length,
     });
@@ -8027,8 +8433,11 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
   });
   console.log('[OMR IMPORT] database transaction committed', {
     importId: importSummary.importId,
+    totalRows: importSummary.totalRows,
     imported: importSummary.imported,
     skipped: importSummary.skipped,
+    invalidRows: importSummary.invalidRows,
+    duplicates: importSummary.duplicateRollNumbers.length,
     unmatched: importSummary.unmatchedRollNumbers.length,
     sheetErrors: importSummary.sheetErrors.length,
   });
@@ -8038,8 +8447,11 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
     targetId: importSummary.importId,
     details: {
       testLabel,
+      totalRows: importSummary.totalRows,
       imported: importSummary.imported,
       skipped: importSummary.skipped,
+      invalidRows: importSummary.invalidRows,
+      duplicateRollNumbers: importSummary.duplicateRollNumbers,
       unmatchedRollNumbers: importSummary.unmatchedRollNumbers,
       sheetErrors: importSummary.sheetErrors,
     },
@@ -8056,10 +8468,11 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
   });
 
   req.session.flash = {
-    type: importSummary.unmatchedRollNumbers.length || importSummary.skipped || importSummary.sheetErrors.length ? 'warning' : 'success',
-    text: `OMR import complete. Imported: ${importSummary.imported}, Skipped: ${importSummary.skipped}, Unmatched: ${importSummary.unmatchedRollNumbers.length}, Errors: ${importSummary.sheetErrors.length}`,
+    type: importSummary.unmatchedRollNumbers.length || importSummary.skipped || importSummary.invalidRows || importSummary.duplicateRollNumbers.length || importSummary.sheetErrors.length ? 'warning' : 'success',
+    text: `Result Excel import complete. Total rows: ${importSummary.totalRows}, Matched/Updated: ${importSummary.updated}, Unmatched: ${importSummary.unmatchedRollNumbers.length}, Invalid: ${importSummary.invalidRows}, Duplicates: ${importSummary.duplicateRollNumbers.length}, Errors: ${importSummary.sheetErrors.length}`,
     details: [
       ...importSummary.unmatchedRollNumbers.map((rollNo) => ({ file: `Roll ${rollNo}`, reason: 'Roll No not found' })),
+      ...importSummary.duplicateRollNumbers.map((rollNo) => ({ file: `Roll ${rollNo}`, reason: 'Duplicate Roll No in file (only first occurrence imported)' })),
       ...importSummary.sheetErrors.map((error) => ({ file: 'Answer sheet', reason: error })),
       ...importSummary.details.slice(0, 15),
     ].slice(0, 30),

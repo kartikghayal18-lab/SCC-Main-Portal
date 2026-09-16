@@ -170,6 +170,7 @@ async function logWhatsAppMessage({
   metaMessageId = null,
   documentUrl = null,
   documentFilename = null,
+  lastError = null,
 }) {
   let resolvedBranchId = branchId;
   if (!resolvedBranchId && studentId) {
@@ -182,8 +183,8 @@ async function logWhatsAppMessage({
 
   const result = await run(
     `INSERT INTO whatsapp_logs (
-      coaching_id, branch_id, student_id, phone_number, message_type, message_content, status, meta_message_id, document_url, document_filename
-    ) VALUES (?, COALESCE(?, app_current_branch_id()), ?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, branch_id, student_id, phone_number, message_type, message_content, status, meta_message_id, document_url, document_filename, last_error
+    ) VALUES (?, COALESCE(?, app_current_branch_id()), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       resolvedBranchId,
@@ -195,6 +196,7 @@ async function logWhatsAppMessage({
       metaMessageId || null,
       documentUrl || null,
       documentFilename || null,
+      lastError ? truncateMessage(lastError) : null,
     ]
   );
   return result.lastID;
@@ -202,20 +204,23 @@ async function logWhatsAppMessage({
 
 async function updateWhatsAppLogStatus(metaMessageId, status, errors = []) {
   if (!metaMessageId || !status) return;
-  const errorText = Array.isArray(errors) && errors.length
-    ? `\n\nDelivery error: ${errors.map((error) => (
+  const hasErrors = Array.isArray(errors) && errors.length > 0;
+  const errorSummary = hasErrors
+    ? errors.map((error) => (
       error?.message || error?.title || error?.code || JSON.stringify(error)
-    )).join('; ')}`
+    )).join('; ')
     : '';
+  const errorText = hasErrors ? `\n\nDelivery error: ${errorSummary}` : '';
   await run(
     `UPDATE whatsapp_logs
      SET status = ?,
          message_content = CASE
            WHEN ? = '' THEN message_content
            ELSE LEFT(COALESCE(message_content, '') || ?, 4000)
-         END
+         END,
+         last_error = CASE WHEN ? = '' THEN last_error ELSE ? END
      WHERE meta_message_id = ?`,
-    [normalizeStatus(status), errorText, errorText, metaMessageId]
+    [normalizeStatus(status), errorText, errorText, errorSummary, truncateMessage(errorSummary), metaMessageId]
   );
 }
 
@@ -325,8 +330,8 @@ async function sendTextMessage({ coachingId, branchId = null, studentId = null, 
     });
     console.error('sendTextMessage failed', error);
     await run(
-      `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
-      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
+      `UPDATE whatsapp_logs SET status = ?, message_content = ?, last_error = ? WHERE id = ?`,
+      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), truncateMessage(error.message), logId]
     );
     return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
@@ -394,8 +399,8 @@ async function sendDocumentMessage({
     });
     console.error('sendDocumentMessage failed', error);
     await run(
-      `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
-      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
+      `UPDATE whatsapp_logs SET status = ?, message_content = ?, last_error = ? WHERE id = ?`,
+      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), truncateMessage(error.message), logId]
     );
     return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
@@ -444,8 +449,8 @@ async function sendImageMessage({
   } catch (error) {
     console.error('sendImageMessage failed', error);
     await run(
-      `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
-      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
+      `UPDATE whatsapp_logs SET status = ?, message_content = ?, last_error = ? WHERE id = ?`,
+      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), truncateMessage(error.message), logId]
     );
     return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
@@ -515,8 +520,8 @@ async function sendTemplateMessage({
       message: error.message,
     });
     await run(
-      `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
-      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
+      `UPDATE whatsapp_logs SET status = ?, message_content = ?, last_error = ? WHERE id = ?`,
+      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), truncateMessage(error.message), logId]
     );
     return { ok: false, failed: true, error: error.message, errorCode: getMetaErrorCode(error), response: error.response || null, logId };
   }
@@ -719,6 +724,7 @@ module.exports = {
   getRecentWhatsAppLogs,
   resendWhatsAppLog,
   updateWhatsAppLogStatus,
+  logWhatsAppMessage,
   sendTextMessage,
   sendDocumentMessage,
   sendImageMessage,

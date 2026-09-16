@@ -389,7 +389,13 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
            admin.whatsapp_number AS whatsapp_number
     FROM whatsapp_settings ws
     JOIN coaching_classes cc ON cc.id = ws.coaching_id
-    LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.branch_id = ws.branch_id AND admin.role = 'admin'
+    LEFT JOIN LATERAL (
+      SELECT a.contact_phone, a.whatsapp_number
+      FROM users a
+      WHERE a.coaching_id = cc.id AND a.branch_id = ws.branch_id AND a.role = 'admin'
+      ORDER BY a.id
+      LIMIT 1
+    ) admin ON TRUE
   `;
 
   const exactMatch = await get(
@@ -439,7 +445,13 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
             admin.whatsapp_number AS whatsapp_number
      FROM branches branch
      JOIN coaching_classes cc ON cc.id = branch.coaching_id
-     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.branch_id = branch.id AND admin.role = 'admin'
+     LEFT JOIN LATERAL (
+       SELECT a.contact_phone, a.whatsapp_number
+       FROM users a
+       WHERE a.coaching_id = cc.id AND a.branch_id = branch.id AND a.role = 'admin'
+       ORDER BY a.id
+       LIMIT 1
+     ) admin ON TRUE
      ORDER BY cc.id ASC
      LIMIT 2`,
     [phoneNumberId]
@@ -532,7 +544,13 @@ async function findStudentByParentPhoneAnyCoaching(phone) {
      FROM users u
      JOIN coaching_classes cc ON cc.id = u.coaching_id
      LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
-     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.branch_id = u.branch_id AND admin.role = 'admin'
+     LEFT JOIN LATERAL (
+       SELECT a.contact_phone, a.whatsapp_number
+       FROM users a
+       WHERE a.coaching_id = cc.id AND a.branch_id = u.branch_id AND a.role = 'admin'
+       ORDER BY a.id
+       LIMIT 1
+     ) admin ON TRUE
      WHERE u.role = 'student'
        AND (
          REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g') = ?

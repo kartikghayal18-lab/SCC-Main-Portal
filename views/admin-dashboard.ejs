@@ -949,10 +949,16 @@
                 <div class="ops2-rules">
                   <p><code>101.pdf</code> assign only</p>
                   <p><code>101_78_100.pdf</code> save 78/100</p>
+                  <p>Or attach a Results Excel (.xlsx) below to assign strictly by an exact <code>Checked File</code> filename match instead of the filename rules above.</p>
                 </div>
                 <form method="post" action="<%= appendCsrfToUrl('/admin/upload-papers') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <div class="ops2-field full"><label>Select Files</label><input type="file" name="papers" multiple required /></div>
+                  <div class="ops2-field full"><label>Results Excel (optional)</label><input type="file" name="resultsExcel" accept=".xlsx" /></div>
+                  <div class="ops2-rules full">
+                    <p>Optional Excel columns: <code>Student</code>, <code>Roll Number</code>, <code>Paper Code</code>, <code>Physics</code>, <code>Chemistry</code>, <code>Biology</code>, <code>Total Score</code>, <code>Correct</code>, <code>Wrong</code>, <code>Blank</code>, <code>Multi-marked</code>, <code>Checked File</code>.</p>
+                    <p>Each row's <code>Checked File</code> value must exactly match one of the uploaded filenames above. Unmatched files, unmatched roll numbers, blank filenames, and duplicates are reported after import and never stop the rest of the batch.</p>
+                  </div>
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload and Assign</button></div>
                 </form>
               </section>
@@ -962,19 +968,19 @@
               <div class="ops2-panel__header">
                 <div>
                   <p class="ops2-eyebrow">Import OMR Results</p>
-                  <h3>CSV marks + optional scanned answer sheets</h3>
-                  <p class="tiny-note">CSV marks are matched strictly by Roll No. Answer sheet filenames must be exact Roll No, such as <code>101.pdf</code>; marks are never read from filenames.</p>
+                  <h3>Excel marks + optional scanned answer sheets</h3>
+                  <p class="tiny-note">Excel marks are matched strictly by Roll No. Answer sheet filenames must be exact Roll No, such as <code>101.pdf</code>; marks are never read from filenames.</p>
                 </div>
               </div>
               <form method="post" action="<%= appendCsrfToUrl('/admin/omr/import-results') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
                 <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                 <div class="ops2-field"><label>Test Name</label><input type="text" name="testLabel" placeholder="NEET Mock Test 01" required /></div>
                 <div class="ops2-field"><label>Max Marks</label><input type="number" name="maxMarks" step="0.01" min="1" placeholder="Required for graphs" required /></div>
-                <div class="ops2-field full"><label>Result CSV</label><input type="file" name="omrCsv" accept=".csv,text/csv" required /></div>
+                <div class="ops2-field full"><label>Result Excel File</label><input type="file" name="omrCsv" accept=".xlsx" required /></div>
                 <div class="ops2-field full"><label>Optional Answer Sheets ZIP/PDF/Image</label><input type="file" name="answerSheets" accept=".zip,.pdf,.jpg,.jpeg,.png,application/zip,application/pdf,image/jpeg,image/png" multiple /></div>
                 <div class="ops2-rules full">
-                  <p>Required CSV columns: <code>Roll No</code>, <code>Student Name</code>, <code>Physics Marks</code>, <code>Chemistry Marks</code>, <code>Biology Marks</code>, <code>Total Marks</code>, <code>Rank</code>.</p>
-                  <p>Unmatched Roll No values are reported and do not stop matched students from importing.</p>
+                  <p>Upload an Excel <code>.xlsx</code> file. Required columns (first worksheet): <code>Roll No</code>, <code>Student Name</code>, <code>Physics Marks</code>, <code>Chemistry Marks</code>, <code>Biology Marks</code>, <code>Total Marks</code>.</p>
+                  <p>Unmatched, invalid, and duplicate Roll No rows are reported separately and do not stop matched students from importing.</p>
                 </div>
                 <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Import OMR Results</button></div>
               </form>
