@@ -3445,6 +3445,19 @@ FROM test_papers tp
     );
   });
 
+  // Unlimited on purpose: the "recent papers" list above is capped for the UI table,
+  // but the progress chart must plot every historical marked test (same requirement
+  // the WhatsApp PERFORMANCE reply already follows in buildStudentPerformance), so a
+  // student with more than 20 papers on file doesn't silently lose older test points.
+  const markedPapersForChart = await all(
+    `SELECT id, original_name, upload_date, marks_obtained, max_marks, test_label
+     FROM test_papers
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+       AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL
+     ORDER BY upload_date DESC`,
+    [coachingId, branchId, studentId]
+  );
+
 	  const attendance = await all(
 	    `SELECT attendance_date, status, notes
 	     FROM attendance
@@ -3502,7 +3515,13 @@ FROM test_papers tp
     ? ((presentCount / totalAttendance) * 100).toFixed(1)
     : '0.0';
 
-  const { progressSeries, marksSummary } = buildProgressSummaryFromPapers(papers);
+  // Feed the full unlimited marked-paper history when any exists so the chart mirrors
+  // WhatsApp's buildStudentPerformance; only fall back to the capped recent list (which
+  // still lets buildProgressSummaryFromPapers show unmarked paper names as placeholders)
+  // when the student has no marks recorded yet at all.
+  const { progressSeries, marksSummary } = buildProgressSummaryFromPapers(
+    markedPapersForChart.length ? markedPapersForChart : papers
+  );
 
   return {
     profile,
@@ -8268,10 +8287,15 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
         studentId: row.studentId,
         testLabel,
       });
+      // Match case/whitespace-insensitively: the test label typed into this import
+      // form rarely matches the label captured from the bulk PDF filename byte-for-byte
+      // ("13sep" vs "13SEP"), and an exact-string match would silently create a second,
+      // file-less test_papers row instead of attaching marks to the paper already on file.
       let paper = await tx.get(
-        `SELECT id
+        `SELECT id, ${getRealPaperFileCondition()} AS has_file
          FROM test_papers
-         WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND test_label = ?
+         WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+           AND LOWER(TRIM(test_label)) = LOWER(TRIM(?))
          ORDER BY upload_date DESC, id DESC
          LIMIT 1`,
         [coachingId, branchId, row.studentId, testLabel]
@@ -8279,7 +8303,15 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
       console.log('[OMR IMPORT][TX] after select existing paper', {
         rollNo: row.matchedRollNo || row.rollNo,
         paperId: paper?.id || null,
+        hasFile: paper?.has_file || false,
       });
+      if (!paper) {
+        console.warn('[OMR IMPORT][TX] no existing paper matched test_label; inserting marks-only row with no attached file', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          studentId: row.studentId,
+          testLabel,
+        });
+      }
       if (paper) {
         console.log('[OMR IMPORT][TX] before update paper', {
           rollNo: row.matchedRollNo || row.rollNo,

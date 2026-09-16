@@ -68,8 +68,26 @@ function isRealPaperFile(paper) {
     && (
       (paper.storage_type === 's3' && paper.public_url)
       || (paper.storage_type === 'local' && paper.storage_key)
+      || paper.omr_scan_path
     )
   );
+}
+
+// Mirrors app.js's getOmrScanPublicUrl, without needing an Express `req`: the WhatsApp
+// webhook path calls this outside of any HTTP request context, so the public base URL
+// has to come from the same env vars getAppPublicBaseUrl() already uses for paper links.
+function getOmrScanPublicUrl(scanPath) {
+  if (!scanPath) return null;
+  const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
+  const resolvedPath = path.resolve(scanPath);
+  if (!resolvedPath.startsWith(`${uploadsRoot}${path.sep}`)) return null;
+  const baseUrl = getAppPublicBaseUrl();
+  if (!baseUrl) return null;
+  const relativePath = path.relative(uploadsRoot, resolvedPath)
+    .split(path.sep)
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `${baseUrl}/uploads/${relativePath}`;
 }
 
 function normalizePublicBaseUrl(value) {
@@ -369,14 +387,29 @@ async function getPaperDocument(paper) {
       fileName: paper.original_name || 'paper.pdf',
     };
   }
-  const access = await getPaperAccess(paper, 'attachment');
-  const localUrl = access?.type === 'local' && getAppPublicBaseUrl() && paper.stored_name
-    ? `${getAppPublicBaseUrl()}/paper-files/${encodeURIComponent(paper.stored_name)}`
-    : null;
-  return {
-    fileUrl: paper.public_url || (access?.type === 'redirect' ? access.url : localUrl),
-    fileName: paper.original_name || 'paper.pdf',
-  };
+  if (paper.storage_type === 'local' && paper.storage_key) {
+    const access = await getPaperAccess(paper, 'attachment');
+    const localUrl = access?.type === 'local' && getAppPublicBaseUrl() && paper.stored_name
+      ? `${getAppPublicBaseUrl()}/paper-files/${encodeURIComponent(paper.stored_name)}`
+      : null;
+    const fileUrl = access?.type === 'redirect' ? access.url : localUrl;
+    if (fileUrl) {
+      return { fileUrl, fileName: paper.original_name || 'paper.pdf' };
+    }
+  }
+  // Result-Excel/OMR imports store the scanned answer sheet as a local disk path
+  // instead of going through the s3/local paper-upload storage fields, so it needs
+  // its own resolution here rather than being invisible to the RESULTS handler.
+  if (paper.omr_scan_path) {
+    const scanUrl = getOmrScanPublicUrl(paper.omr_scan_path);
+    if (scanUrl) {
+      return {
+        fileUrl: scanUrl,
+        fileName: paper.omr_scan_original_name || paper.original_name || 'result.pdf',
+      };
+    }
+  }
+  return null;
 }
 
 async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
@@ -786,17 +819,71 @@ async function sendLatestPaper(student, phone) {
 }
 
 async function sendLatestResult(student, phone) {
+  console.log('[RESULTS] request received', {
+    incomingWhatsAppNumber: phone,
+    resolvedStudentId: student.id,
+    resolvedRollNo: student.roll_no,
+    coachingId: student.coaching_id,
+    branchId: student.branch_id,
+  });
+
+  // Only ever pick a row that has BOTH a scored result AND a real, sendable file —
+  // "real" covers every storage mechanism the admin upload flows actually use: the
+  // s3/local paper-upload fields (bulk PDF upload) and omr_scan_path (the answer-sheet
+  // scan attached during a Result-Excel/OMR import). A marks-only row with neither
+  // (e.g. an OMR import that matched no existing paper) must never be picked, so a
+  // parent is never told a result is ready when nothing can actually be sent.
   const paper = await get(
     `SELECT id, original_name, stored_name, storage_type, storage_key, public_url, content_type,
+            omr_scan_path, omr_scan_original_name,
             upload_date, marks_obtained, max_marks, test_label
      FROM test_papers
      WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
        AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL
+       AND (
+         (storage_type = 's3' AND public_url IS NOT NULL AND public_url <> '')
+         OR (storage_type = 'local' AND storage_key IS NOT NULL AND storage_key <> '')
+         OR (omr_scan_path IS NOT NULL AND omr_scan_path <> '')
+       )
      ORDER BY upload_date DESC, id DESC
      LIMIT 1`,
     [student.coaching_id, student.branch_id, student.id]
   );
-  if (!paper) return false;
+
+  if (!paper) {
+    // Diagnostic-only lookup so the log states the *exact* reason no result was sent,
+    // without changing which row (if any) the parent actually receives.
+    const latestMarksOnly = await get(
+      `SELECT id, test_label, upload_date, marks_obtained, max_marks, storage_type
+       FROM test_papers
+       WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+         AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL
+       ORDER BY upload_date DESC, id DESC
+       LIMIT 1`,
+      [student.coaching_id, student.branch_id, student.id]
+    );
+    console.log('[RESULTS] no sendable result found', {
+      resolvedStudentId: student.id,
+      resolvedRollNo: student.roll_no,
+      reason: latestMarksOnly
+        ? `Latest marks record (paper id ${latestMarksOnly.id}, test "${latestMarksOnly.test_label}") has no file attached (storage_type=${latestMarksOnly.storage_type || 'none'})`
+        : 'No test_papers record with both marks_obtained and max_marks exists for this student',
+      latestMarksOnlyPaperId: latestMarksOnly?.id || null,
+    });
+    return false;
+  }
+
+  console.log('[RESULTS] latest result record resolved', {
+    resolvedStudentId: student.id,
+    resolvedRollNo: student.roll_no,
+    paperId: paper.id,
+    testLabel: paper.test_label,
+    testDate: paper.upload_date,
+    marksObtained: paper.marks_obtained,
+    maxMarks: paper.max_marks,
+    storageType: paper.storage_type,
+  });
+
   const percentage = Number(paper.max_marks) > 0
     ? formatPercent((Number(paper.marks_obtained || 0) / Number(paper.max_marks)) * 100)
     : '-';
@@ -812,26 +899,38 @@ async function sendLatestResult(student, phone) {
     '',
     'View full result in Parent Portal.',
   ];
-  await sendWhatsAppNotification({
+  const summaryResult = await sendWhatsAppNotification({
     studentId: student.id,
     phone,
     type: 'parent_menu_latest_result_summary',
     message: compactWhatsAppMessage(resultMessage),
     eventKey: `parent_menu_latest_result_summary:${student.id}:${paper.id}:${Date.now()}`,
   });
+  console.log('[RESULTS] summary message API response', { paperId: paper.id, result: summaryResult });
 
   try {
     const document = await getPaperDocument(paper);
+    console.log('[RESULTS] resolved document', {
+      paperId: paper.id,
+      fileUrl: document?.fileUrl || null,
+      fileExists: Boolean(document?.fileUrl),
+    });
     if (!document?.fileUrl) {
-      console.error('Latest result PDF missing public URL', { studentId: student.id, paperId: paper.id });
+      console.error('[RESULTS] latest result matched a file-bearing row but URL resolution failed', {
+        studentId: student.id,
+        paperId: paper.id,
+        storageType: paper.storage_type,
+        hasOmrScan: Boolean(paper.omr_scan_path),
+      });
       return true;
     }
-    await sendDocumentNotification(student.id, phone, document.fileUrl, document.fileName, 'Result PDF attached.', {
+    const documentResult = await sendDocumentNotification(student.id, phone, document.fileUrl, document.fileName, 'Result PDF attached.', {
       type: 'parent_menu_latest_result',
       eventKey: `parent_menu_latest_result:${student.id}:${paper.id}:${Date.now()}`,
     });
+    console.log('[RESULTS] document send API response', { paperId: paper.id, fileUrl: document.fileUrl, result: documentResult });
   } catch (error) {
-    console.error('Latest result PDF send failed', { studentId: student.id, paperId: paper.id, error: error.message });
+    console.error('[RESULTS] latest result PDF send failed', { studentId: student.id, paperId: paper.id, error: error.message });
   }
   return true;
 }
