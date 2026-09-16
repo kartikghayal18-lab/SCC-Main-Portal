@@ -955,9 +955,11 @@
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <div class="ops2-field full"><label>Select Files</label><input type="file" name="papers" multiple required /></div>
                   <div class="ops2-field full"><label>Results Excel (optional)</label><input type="file" name="resultsExcel" accept=".xlsx" /></div>
+                  <div class="ops2-field"><label>Max Marks (for this batch)</label><input type="number" name="maxMarks" step="0.01" min="0" placeholder="e.g. 180 — needed for the score/graph to show a percentage" /></div>
                   <div class="ops2-rules full">
                     <p>Optional Excel columns: <code>Student</code>, <code>Roll Number</code>, <code>Paper Code</code>, <code>Physics</code>, <code>Chemistry</code>, <code>Biology</code>, <code>Total Score</code>, <code>Correct</code>, <code>Wrong</code>, <code>Blank</code>, <code>Multi-marked</code>, <code>Checked File</code>.</p>
                     <p>Each row's <code>Checked File</code> value must exactly match one of the uploaded filenames above. Unmatched files, unmatched roll numbers, blank filenames, and duplicates are reported after import and never stop the rest of the batch.</p>
+                    <p>If <code>Total Score</code> is provided but Max Marks is left blank here, the system reuses whatever max marks this same test name is already configured with elsewhere (e.g. an earlier Result Excel import) — it never guesses a number.</p>
                   </div>
                   <div class="ops2-field full" id="bulk-paper-progress" hidden>
                     <div class="bpp-bar"><div class="bpp-bar__fill" id="bpp-fill" style="width:0%"></div></div>
@@ -973,6 +975,15 @@
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload and Assign</button></div>
                 </form>
               </section>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Maintenance</p><h3>Fix duplicate paper/marks records</h3></div></div>
+              <p class="ops2-rules">Merges any student+test that ended up split across two records (a PDF-only row and a separate marks-only row) into one — safe to run any time. Anything ambiguous (conflicting files or marks) is left untouched and reported for manual review.</p>
+              <form method="post" action="<%= appendCsrfToUrl('/admin/papers/reconcile-duplicates') %>" data-single-submit>
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <div class="ops2-actions"><button type="submit" class="ops2-ghost-btn">Check and merge duplicates for this branch</button></div>
+              </form>
             </section>
 
             <style>

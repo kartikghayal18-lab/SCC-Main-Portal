@@ -32,6 +32,11 @@
         <a href="/admin/dashboard?section=overview" class="sec-btn">Back to Overview</a>
         <a href="/admin/dashboard?section=students" class="sec-btn">Student List</a>
         <a href="/admin/dashboard?section=students" class="btn secondary compact">Return to Admin Page</a>
+        <form method="post" action="<%= appendCsrfToUrl('/admin/papers/reconcile-duplicates') %>" style="display:inline">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <input type="hidden" name="studentId" value="<%= student?.id %>" />
+          <button type="submit" class="btn secondary compact" title="Merges any test split across a PDF-only record and a marks-only record for this student">Fix duplicate records</button>
+        </form>
       </div>
     </div>
 

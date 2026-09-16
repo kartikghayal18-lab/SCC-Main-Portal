@@ -59,7 +59,7 @@ const {
   validatePublicUrl,
   verifyReceiptAccessToken,
 } = require('./services/parentAssistant');
-const { buildProgressSummaryFromPapers } = require('./services/progress');
+const { buildProgressSummaryFromPapers, getMarkedPapersForStudent } = require('./services/progress');
 const {
   createPerfTrace,
   getGlobalSlowOperations,
@@ -104,6 +104,41 @@ function getRealPaperFileCondition(alias = '') {
   const prefix = alias ? `${alias}.` : '';
   return `((${prefix}storage_type = 's3' AND ${prefix}public_url IS NOT NULL AND ${prefix}public_url <> '')
     OR (${prefix}storage_type = 'local' AND ${prefix}storage_key IS NOT NULL AND ${prefix}storage_key <> ''))`;
+}
+
+// Resolves the real max marks for a test instead of ever fabricating one. Order of
+// trust: (1) a value the admin actually typed/parsed for this specific upload, (2) the
+// max marks already "configured" for this exact test elsewhere in the system — i.e. any
+// other test_papers row for the same coaching/branch/test label (case/whitespace
+// normalized) that already carries a valid max_marks, most recent first. Returns null
+// (never a guessed number) when neither source has one, so callers store an honest NULL
+// rather than a wrong percentage.
+async function resolveConfiguredMaxMarks(coachingId, branchId, testLabel, explicitMaxMarks) {
+  const explicit = Number(explicitMaxMarks);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  if (!testLabel) return null;
+  const configured = await get(
+    `SELECT max_marks
+     FROM test_papers
+     WHERE coaching_id = ? AND branch_id = ?
+       AND LOWER(TRIM(test_label)) = LOWER(TRIM(?))
+       AND max_marks IS NOT NULL AND max_marks > 0
+     ORDER BY upload_date DESC, id DESC
+     LIMIT 1`,
+    [coachingId, branchId, testLabel]
+  );
+  return configured?.max_marks ? Number(configured.max_marks) : null;
+}
+
+// percentage = (marks_obtained / max_marks) * 100, rounded to 2 decimals — the one
+// formula every part of the app uses (portal chart, WhatsApp messages, the stored
+// test_papers.percentage column). Returns null instead of a misleading value when
+// either input is missing, so a row without a real max marks stores an honest NULL.
+function computePercentage(marksObtained, maxMarks) {
+  const marks = Number(marksObtained);
+  const max = Number(maxMarks);
+  if (!Number.isFinite(marks) || !Number.isFinite(max) || max <= 0) return null;
+  return Number(((marks / max) * 100).toFixed(2));
 }
 
 function resolvePort(value) {
@@ -2332,9 +2367,11 @@ function parsePaperMetaFromFileName(originalName) {
 
   if (parts.length >= 3 && /^\d+(\.\d+)?$/.test(parts[2])) {
     maxMarks = Number(parts[2]);
-  } else if (marksObtained !== null) {
-    maxMarks = 100;
   }
+  // No more guessing a max-marks value that isn't in the filename: a hardcoded "100"
+  // silently produced wrong percentages for every non-100-mark test (e.g. a 180-question
+  // OMR paper). Callers resolve a missing maxMarks via resolveConfiguredMaxMarks() instead,
+  // which looks up the real configured max for this test rather than assuming one.
 
   if (parts.length > 3) {
     testLabel = parts.slice(3).join(' ');
@@ -3283,7 +3320,7 @@ async function savePaperUpload({
         `UPDATE test_papers
          SET original_name = ?, stored_name = ?, uploaded_by = ?,
              storage_type = ?, storage_key = ?, public_url = ?, content_type = ?, size_bytes = ?,
-             marks_obtained = ?, max_marks = ?, test_label = ?, paper_type = 'answer_submission',
+             marks_obtained = ?, max_marks = ?, percentage = ?, test_label = ?, paper_type = 'answer_submission',
              upload_date = CURRENT_TIMESTAMP
          WHERE id = ? AND branch_id = ?`,
         [
@@ -3297,6 +3334,7 @@ async function savePaperUpload({
           stored.sizeBytes,
           marksObtained,
           maxMarks,
+          computePercentage(marksObtained, maxMarks),
           testLabel || file.originalname,
           existing.id,
           branchId,
@@ -3315,14 +3353,66 @@ async function savePaperUpload({
     }
   }
 
+  if (answerRequestId === null && testLabel) {
+    // Symmetric to the OMR-import merge in /admin/omr/import-results (which attaches
+    // marks to an existing file-bearing row): if marks were imported for this test
+    // before any PDF was uploaded, the marks-only row must be completed with the file
+    // here rather than left orphaned while a second, separate file-only row is created
+    // (Test Case 2 / spec item A.9 and G — "must later merge with the PDF record").
+    const existingMarksOnly = await get(
+      `SELECT id, marks_obtained, max_marks
+       FROM test_papers
+       WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+         AND LOWER(TRIM(test_label)) = LOWER(TRIM(?))
+         AND NOT ${getRealPaperFileCondition()}
+       ORDER BY upload_date DESC, id DESC
+       LIMIT 1`,
+      [coachingId, branchId, studentId, testLabel]
+    );
+
+    if (existingMarksOnly) {
+      const mergedMarksObtained = marksObtained ?? existingMarksOnly.marks_obtained;
+      const mergedMaxMarks = maxMarks ?? existingMarksOnly.max_marks;
+      await run(
+        `UPDATE test_papers
+         SET original_name = ?, stored_name = ?, uploaded_by = ?,
+             storage_type = ?, storage_key = ?, public_url = ?, content_type = ?, size_bytes = ?,
+             marks_obtained = COALESCE(?, marks_obtained), max_marks = COALESCE(?, max_marks),
+             percentage = ?,
+             physics_marks = COALESCE(?, physics_marks), chemistry_marks = COALESCE(?, chemistry_marks),
+             biology_marks = COALESCE(?, biology_marks), correct_count = COALESCE(?, correct_count),
+             wrong_count = COALESCE(?, wrong_count), unattempted_count = COALESCE(?, unattempted_count),
+             multi_marked_count = COALESCE(?, multi_marked_count),
+             upload_date = CURRENT_TIMESTAMP
+         WHERE id = ? AND branch_id = ?`,
+        [
+          file.originalname, stored.storedName, uploadedBy,
+          stored.storageType, stored.storageKey, stored.publicUrl, stored.contentType, stored.sizeBytes,
+          marksObtained, maxMarks,
+          computePercentage(mergedMarksObtained, mergedMaxMarks),
+          physicsMarks, chemistryMarks, biologyMarks,
+          correctCount, wrongCount, blankCount, multiMarkedCount,
+          existingMarksOnly.id, branchId,
+        ]
+      );
+      console.log('[PAPER MERGE] attached uploaded file to existing marks-only test_papers record', {
+        paperId: existingMarksOnly.id,
+        studentId,
+        testLabel,
+        previousMarks: { marksObtained: existingMarksOnly.marks_obtained, maxMarks: existingMarksOnly.max_marks },
+      });
+      return { status: 'replaced', paperId: existingMarksOnly.id };
+    }
+  }
+
   const result = await run(
     `INSERT INTO test_papers (
       coaching_id, branch_id, student_id, original_name, stored_name, uploaded_by,
       storage_type, storage_key, public_url, content_type, size_bytes,
-      marks_obtained, max_marks, test_label, paper_type, answer_request_id,
+      marks_obtained, max_marks, percentage, test_label, paper_type, answer_request_id,
       physics_marks, chemistry_marks, biology_marks, correct_count, wrong_count,
       unattempted_count, multi_marked_count, omr_barcode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       branchId,
@@ -3337,6 +3427,7 @@ async function savePaperUpload({
       stored.sizeBytes,
       marksObtained,
       maxMarks,
+      computePercentage(marksObtained, maxMarks),
       testLabel || file.originalname,
       answerRequestId !== null ? 'answer_submission' : 'general',
       answerRequestId,
@@ -3408,6 +3499,135 @@ async function cleanupDuplicateAnswerSubmissions() {
   }
 }
 
+// One-time/on-demand cleanup for test_papers rows split across multiple records for
+// what is really the same test (e.g. one row holding the PDF with no marks, another
+// holding marks with no PDF — created by the historical bugs this fix addresses).
+// Merges each group into a single canonical row and removes the redundant rows, but
+// only when the merge is unambiguous: if a group has more than one row with a genuinely
+// different file, or more than one row with disagreeing marks, it is left untouched and
+// logged for manual review rather than guessing which value is correct ("do not delete
+// data blindly").
+async function reconcileTestPaperDuplicates({ coachingId, branchId, studentId = null }) {
+  const duplicateGroups = await all(
+    `SELECT student_id, LOWER(TRIM(test_label)) AS normalized_label, COUNT(*) AS duplicate_count
+     FROM test_papers
+     WHERE coaching_id = ? AND branch_id = ?
+       AND test_label IS NOT NULL AND TRIM(test_label) <> ''
+       AND (?::int IS NULL OR student_id = ?)
+     GROUP BY student_id, LOWER(TRIM(test_label))
+     HAVING COUNT(*) > 1`,
+    [coachingId, branchId, studentId, studentId]
+  );
+
+  const summary = { groupsFound: duplicateGroups.length, merged: 0, skippedAmbiguous: 0, details: [] };
+
+  for (const group of duplicateGroups) {
+    const rows = await all(
+      `SELECT id, original_name, stored_name, storage_type, storage_key, public_url, content_type, size_bytes,
+              marks_obtained, max_marks, physics_marks, chemistry_marks, biology_marks,
+              correct_count, wrong_count, unattempted_count, multi_marked_count,
+              omr_scan_path, omr_scan_original_name, test_label, upload_date
+       FROM test_papers
+       WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+         AND LOWER(TRIM(test_label)) = ?
+       ORDER BY upload_date DESC, id DESC`,
+      [coachingId, branchId, group.student_id, group.normalized_label]
+    );
+
+    const fileRows = rows.filter((row) => (row.storage_type === 's3' && row.public_url) || (row.storage_type === 'local' && row.storage_key));
+    const marksRows = rows.filter((row) => row.marks_obtained !== null && row.max_marks !== null && Number(row.max_marks) > 0);
+    const distinctFileKeys = new Set(fileRows.map((row) => `${row.storage_type}:${row.storage_key || row.public_url}`));
+    const distinctMarksKeys = new Set(marksRows.map((row) => `${row.marks_obtained}:${row.max_marks}`));
+
+    if (distinctFileKeys.size > 1 || distinctMarksKeys.size > 1) {
+      summary.skippedAmbiguous += 1;
+      const reason = distinctFileKeys.size > 1 ? 'Multiple rows carry different files' : 'Multiple rows carry disagreeing marks';
+      summary.details.push({ studentId: group.student_id, testLabel: group.normalized_label, reason, paperIds: rows.map((row) => row.id) });
+      console.warn('[PAPER RECONCILE] skipped ambiguous duplicate group', { studentId: group.student_id, testLabel: group.normalized_label, reason, paperIds: rows.map((row) => row.id) });
+      continue;
+    }
+
+    const fileRow = fileRows[0] || null;
+    const marksRow = marksRows[0] || null;
+    const omrScanRow = rows.find((row) => row.omr_scan_path) || null;
+    const canonical = fileRow || marksRow || rows[0];
+    const others = rows.filter((row) => row.id !== canonical.id);
+    if (!others.length) continue;
+
+    const merged = {
+      original_name: canonical.original_name ?? fileRow?.original_name ?? null,
+      stored_name: canonical.stored_name ?? fileRow?.stored_name ?? null,
+      storage_type: canonical.storage_type ?? fileRow?.storage_type ?? null,
+      storage_key: canonical.storage_key ?? fileRow?.storage_key ?? null,
+      public_url: canonical.public_url ?? fileRow?.public_url ?? null,
+      content_type: canonical.content_type ?? fileRow?.content_type ?? null,
+      size_bytes: canonical.size_bytes ?? fileRow?.size_bytes ?? null,
+      marks_obtained: canonical.marks_obtained ?? marksRow?.marks_obtained ?? null,
+      max_marks: canonical.max_marks ?? marksRow?.max_marks ?? null,
+      physics_marks: canonical.physics_marks ?? marksRow?.physics_marks ?? null,
+      chemistry_marks: canonical.chemistry_marks ?? marksRow?.chemistry_marks ?? null,
+      biology_marks: canonical.biology_marks ?? marksRow?.biology_marks ?? null,
+      correct_count: canonical.correct_count ?? marksRow?.correct_count ?? null,
+      wrong_count: canonical.wrong_count ?? marksRow?.wrong_count ?? null,
+      unattempted_count: canonical.unattempted_count ?? marksRow?.unattempted_count ?? null,
+      multi_marked_count: canonical.multi_marked_count ?? marksRow?.multi_marked_count ?? null,
+      omr_scan_path: canonical.omr_scan_path ?? omrScanRow?.omr_scan_path ?? null,
+      omr_scan_original_name: canonical.omr_scan_original_name ?? omrScanRow?.omr_scan_original_name ?? null,
+    };
+    merged.percentage = computePercentage(merged.marks_obtained, merged.max_marks);
+
+    await withTransaction(async (tx) => {
+      await tx.run(
+        `UPDATE test_papers SET
+           original_name = ?, stored_name = ?, storage_type = ?, storage_key = ?, public_url = ?,
+           content_type = ?, size_bytes = ?, marks_obtained = ?, max_marks = ?, percentage = ?,
+           physics_marks = ?, chemistry_marks = ?, biology_marks = ?,
+           correct_count = ?, wrong_count = ?, unattempted_count = ?, multi_marked_count = ?,
+           omr_scan_path = ?, omr_scan_original_name = ?
+         WHERE id = ? AND branch_id = ?`,
+        [
+          merged.original_name, merged.stored_name, merged.storage_type, merged.storage_key, merged.public_url,
+          merged.content_type, merged.size_bytes, merged.marks_obtained, merged.max_marks, merged.percentage,
+          merged.physics_marks, merged.chemistry_marks, merged.biology_marks,
+          merged.correct_count, merged.wrong_count, merged.unattempted_count, merged.multi_marked_count,
+          merged.omr_scan_path, merged.omr_scan_original_name,
+          canonical.id, branchId,
+        ]
+      );
+      for (const duplicateRow of others) {
+        await tx.run(`DELETE FROM test_papers WHERE id = ? AND branch_id = ?`, [duplicateRow.id, branchId]);
+      }
+    });
+
+    // Storage asset cleanup happens after the transaction commits, and only for a
+    // duplicate whose file differs from what the canonical row now points to — never
+    // for a file still referenced by the record that was kept.
+    for (const duplicateRow of others) {
+      const keptSameFile = duplicateRow.storage_key && duplicateRow.storage_key === merged.storage_key && duplicateRow.storage_type === merged.storage_type;
+      if (!keptSameFile && (duplicateRow.storage_key || duplicateRow.public_url)) {
+        try {
+          await deleteStoredPaper(duplicateRow);
+        } catch (error) {
+          console.error('[PAPER RECONCILE] failed deleting superseded duplicate asset', { paperId: duplicateRow.id, error: error.message });
+        }
+      }
+    }
+
+    summary.merged += 1;
+    summary.details.push({ studentId: group.student_id, testLabel: group.normalized_label, canonicalPaperId: canonical.id, mergedPaperIds: others.map((row) => row.id) });
+    console.log('[PAPER RECONCILE] merged duplicate test_papers records', {
+      studentId: group.student_id,
+      testLabel: group.normalized_label,
+      canonicalPaperId: canonical.id,
+      mergedPaperIds: others.map((row) => row.id),
+      resultingMarks: { marksObtained: merged.marks_obtained, maxMarks: merged.max_marks },
+      resultingFile: { storageType: merged.storage_type, hasFile: Boolean(merged.storage_key || merged.public_url || merged.omr_scan_path) },
+    });
+  }
+
+  return summary;
+}
+
 async function getStudentDashboardPayload(coachingId, branchId, studentId) {
   if (studentId === undefined) {
     studentId = branchId;
@@ -3445,18 +3665,12 @@ FROM test_papers tp
     );
   });
 
-  // Unlimited on purpose: the "recent papers" list above is capped for the UI table,
-  // but the progress chart must plot every historical marked test (same requirement
-  // the WhatsApp PERFORMANCE reply already follows in buildStudentPerformance), so a
-  // student with more than 20 papers on file doesn't silently lose older test points.
-  const markedPapersForChart = await all(
-    `SELECT id, original_name, upload_date, marks_obtained, max_marks, test_label
-     FROM test_papers
-     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
-       AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL
-     ORDER BY upload_date DESC`,
-    [coachingId, branchId, studentId]
-  );
+  // Shared with the WhatsApp PERFORMANCE handler (getMarkedPapersForStudent in
+  // services/progress.js) so the admin overview and the parent's WhatsApp graph are
+  // always built from the exact same rows — not two independently-maintained queries
+  // that can silently drift apart. Unlimited on purpose: the "recent papers" list above
+  // is capped for the UI table, but the chart must plot every historical marked test.
+  const markedPapersForChart = await getMarkedPapersForStudent(coachingId, branchId, studentId);
 
 	  const attendance = await all(
 	    `SELECT attendance_date, status, notes
@@ -7752,6 +7966,10 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const files = req.files?.papers || [];
   const excelFile = (req.files?.resultsExcel || [])[0] || null;
+  // Same "Max Marks" field the form already renders for the filename-parsing path
+  // (views/admin-dashboard.ejs) is still submitted when a Results Excel is attached
+  // instead — it must not be silently discarded just because this branch is taken.
+  const batchMaxMarks = parseOptionalNumber(req.body.maxMarks);
 
   // Progressive enhancement only: a plain <form> POST (no JS, or JS disabled) gets
   // the exact original behaviour below — process everything, then res.redirect().
@@ -7896,6 +8114,23 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       seenRollKeys.add(rollKey);
       seenCheckedFiles.add(row.checkedFile);
 
+      const rowTestLabel = row.paperCode || file.originalname;
+      // Previously hardcoded to null, which discarded any obtained score by making it
+      // permanently invisible to the graph/RESULTS/PERFORMANCE queries (they all require
+      // max_marks to be set). Resolve the real configured max instead: the batch-level
+      // "Max Marks" field first, else whatever max marks this exact test is already
+      // configured with elsewhere (e.g. a prior OMR import for the same test label).
+      const rowMaxMarks = row.totalScore !== null
+        ? await resolveConfiguredMaxMarks(coachingId, branchId, rowTestLabel, batchMaxMarks)
+        : null;
+      if (row.totalScore !== null && !rowMaxMarks) {
+        console.warn('[BULK PAPER UPLOAD] Total Score present but no max marks configured; storing marks without max_marks (will not appear on graphs until max marks is set)', {
+          row: row.rowNumber,
+          rollNo: row.rollNo,
+          testLabel: rowTestLabel,
+        });
+      }
+
       let uploadResult = null;
       try {
         uploadResult = await savePaperUpload({
@@ -7904,9 +8139,9 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
           studentId: student.id,
           file,
           uploadedBy: req.session.user.id,
-          testLabel: row.paperCode || file.originalname,
+          testLabel: rowTestLabel,
           marksObtained: row.totalScore,
-          maxMarks: null,
+          maxMarks: rowMaxMarks,
           answerRequestId: null,
           physicsMarks: row.physicsMarks,
           chemistryMarks: row.chemistryMarks,
@@ -7945,7 +8180,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
             coaching,
             student,
             paperId: uploadResult.paperId,
-            type: row.totalScore !== null ? 'test_result_published' : 'test_paper_upload',
+            type: row.totalScore !== null && rowMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
           });
           console.log('[BULK PAPER UPLOAD] WhatsApp notify result', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, result: notifyResult });
         } catch (notifyErr) {
@@ -8022,6 +8257,14 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       continue;
     }
 
+    const fileTestLabel = paperMeta.testLabel || file.originalname;
+    // parsePaperMetaFromFileName no longer guesses a max-marks value (it used to assume
+    // 100, which was wrong for any other test size). Resolve the real one instead: the
+    // form's "Max Marks" field first, else this test's already-configured max elsewhere.
+    const fileMaxMarks = paperMeta.marksObtained !== null
+      ? await resolveConfiguredMaxMarks(coachingId, branchId, fileTestLabel, paperMeta.maxMarks ?? batchMaxMarks)
+      : null;
+
     let uploadResult = null;
     try {
       uploadResult = await savePaperUpload({
@@ -8030,9 +8273,9 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
         studentId: student.id,
         file,
         uploadedBy: req.session.user.id,
-        testLabel: paperMeta.testLabel || file.originalname,
+        testLabel: fileTestLabel,
         marksObtained: paperMeta.marksObtained,
-        maxMarks: paperMeta.maxMarks,
+        maxMarks: fileMaxMarks,
         answerRequestId: null,
       });
     } catch (err) {
@@ -8060,7 +8303,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
         coaching,
         student,
         paperId: uploadResult.paperId,
-        type: paperMeta.marksObtained !== null && paperMeta.maxMarks !== null ? 'test_result_published' : 'test_paper_upload',
+        type: paperMeta.marksObtained !== null && fileMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
       });
       console.log('[BULK PAPER UPLOAD] WhatsApp notify result', {
         file: file.originalname,
@@ -8904,6 +9147,28 @@ app.post('/admin/omr/import/cancel', requireCoachingAdmin, async (req, res) => {
   delete req.session.omrPreview;
   req.session.flash = { type: 'success', text: 'OMR preview cleared.' };
   return res.redirect('/admin/dashboard?section=omr');
+});
+
+// Cleans up test_papers rows left split across multiple records by the historical
+// bugs this fix addresses (a PDF-only row and a marks-only row for what is really the
+// same test). Safe to run repeatedly: unambiguous groups merge into one canonical
+// record, anything ambiguous is left alone and reported. Optional ?studentId= scopes
+// it to a single student (used from the admin-student-overview page); omitted runs it
+// for the whole branch.
+app.post('/admin/papers/reconcile-duplicates', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const studentId = parseOptionalPositiveInteger(req.body.studentId || req.query.studentId);
+  console.log('[PAPER RECONCILE] starting', { coachingId, branchId, studentId, requestedBy: req.session.user.id });
+  const summary = await reconcileTestPaperDuplicates({ coachingId, branchId, studentId });
+  console.log('[PAPER RECONCILE] finished', summary);
+  await auditActor(req, 'papers_reconciled', { targetType: studentId ? 'student' : 'branch', targetId: studentId || branchId, details: summary });
+  req.session.flash = {
+    type: summary.skippedAmbiguous ? 'warning' : 'success',
+    text: `Duplicate check complete. Groups found: ${summary.groupsFound}, merged: ${summary.merged}, needs manual review: ${summary.skippedAmbiguous}.`,
+    details: summary.details.slice(0, 30),
+  };
+  return res.redirect(studentId ? `/admin/students/${studentId}/overview` : '/admin/dashboard?section=papers');
 });
 
 app.post('/admin/omr/scans/upload', requireCoachingAdmin, omrUpload.array('omrScans', 200), async (req, res) => {

@@ -1,4 +1,28 @@
 const path = require('path');
+const { all } = require('../db');
+
+// Single source of truth for "which test_papers rows count as a valid marked result"
+// for a student. Both the admin student-overview route (src/app.js) and the WhatsApp
+// PERFORMANCE handler (src/services/parentAssistant.js) call this instead of running
+// their own independent queries, so the two can never drift out of sync — a paper only
+// shows up in either place once it has a real numeric score out of a real max.
+// Intentionally unlimited: a student's full history must appear on the graph, not just
+// their most recent papers.
+async function getMarkedPapersForStudent(coachingId, branchId, studentId) {
+  return all(
+    `SELECT id, original_name, upload_date, marks_obtained, max_marks, test_label
+     FROM test_papers
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+       AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0
+     ORDER BY upload_date DESC`,
+    [coachingId, branchId, studentId]
+  );
+}
+
+async function getStudentPerformanceSummary(coachingId, branchId, studentId) {
+  const markedPapers = await getMarkedPapersForStudent(coachingId, branchId, studentId);
+  return buildProgressSummaryFromPapers(markedPapers);
+}
 
 function buildProgressSummaryFromPapers(papers) {
   const normalizedPapers = (papers || [])
@@ -46,4 +70,6 @@ function buildProgressSummaryFromPapers(papers) {
 
 module.exports = {
   buildProgressSummaryFromPapers,
+  getMarkedPapersForStudent,
+  getStudentPerformanceSummary,
 };

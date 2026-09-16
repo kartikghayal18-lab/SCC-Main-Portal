@@ -5,7 +5,7 @@ const { get, all, run } = require('../db');
 const { getPaperAccess, getStoredFilePublicUrl, uploadGeneratedFile } = require('../storage');
 const { sendDocumentNotification, sendWhatsAppNotification } = require('./notificationService');
 const { getNextDueDate, getStudentFeeSummary } = require('./feeStructure');
-const { buildProgressSummaryFromPapers } = require('./progress');
+const { buildProgressSummaryFromPapers, getMarkedPapersForStudent } = require('./progress');
 
 function cleanPhoneNumber(value) {
   return String(value || '').replace(/[^\d]/g, '');
@@ -727,14 +727,10 @@ async function buildStudentPerformance(coachingId, branchId, studentId) {
      LIMIT 1`,
     [studentId, coachingId, branchId]
   );
-  const papers = await all(
-    `SELECT id, original_name, upload_date, marks_obtained, max_marks, test_label,
-            stored_name, storage_type, storage_key, public_url, content_type
-     FROM test_papers
-     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
-     ORDER BY upload_date DESC`,
-    [coachingId, branchId, studentId]
-  );
+  // Shared with the admin student-overview route (getMarkedPapersForStudent in
+  // services/progress.js) so this WhatsApp response and the admin dashboard are always
+  // built from the exact same rows, never two independently-maintained queries.
+  const papers = await getMarkedPapersForStudent(coachingId, branchId, studentId);
   const { markedPapers, progressSeries, marksSummary } = buildProgressSummaryFromPapers(papers);
   const attendance = await get(
     `SELECT COUNT(*) AS total_classes,
@@ -936,34 +932,72 @@ async function sendLatestResult(student, phone) {
 }
 
 async function sendPerformanceGraph(student, phone, coaching = null, options = {}) {
+  console.log('[PERFORMANCE] request received', {
+    incomingWhatsAppNumber: phone,
+    resolvedStudentId: student.id,
+    resolvedRollNo: student.roll_no,
+  });
+
   const performance = await buildStudentPerformance(student.coaching_id, student.branch_id, student.id);
-  const hasPerformanceRows = Number(performance.marksSummary.papersCount || 0) > 0;
-  const message = hasPerformanceRows
-    ? [
+  // testsCount (not papersCount) is the count of rows with a valid numeric score AND a
+  // valid max_marks > 0 — i.e. actually "marked" papers. Gating on papersCount here used
+  // to count every test_papers row including unmarked/file-only ones, which could report
+  // performance data as available even when nothing was actually gradeable yet.
+  const testsCount = Number(performance.marksSummary.testsCount || 0);
+  const hasPerformanceRows = testsCount > 0;
+  const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
+
+  console.log('[PERFORMANCE] marked papers resolved', {
+    resolvedStudentId: student.id,
+    testsCount,
+    totalMarksObtained: performance.marksSummary.totalMarksObtained,
+    totalMaxMarks: performance.marksSummary.totalMaxMarks,
+    marksPercent: performance.marksSummary.marksPercent,
+  });
+
+  let message;
+  if (!hasPerformanceRows) {
+    // Useful diagnostic rather than a bare "no data": tell the parent whether any
+    // papers exist at all for this student, since "uploaded but not yet marked" and
+    // "nothing uploaded yet" call for different next steps.
+    const anyPapers = await get(
+      `SELECT COUNT(*) AS total FROM test_papers WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`,
+      [student.coaching_id, student.branch_id, student.id]
+    );
+    const papersOnFile = Number(anyPapers?.total || 0);
+    message = papersOnFile > 0
+      ? 'No performance data available yet. Papers are on file for this student, but none have valid marks and maximum marks recorded yet. The graph updates automatically once a test result is imported.'
+      : 'No performance data available yet. No test papers have been uploaded for this student yet.';
+    console.log('[PERFORMANCE] no valid marked papers found', { resolvedStudentId: student.id, papersOnFile });
+  } else {
+    message = [
       `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
       '',
       '📈 Performance Update',
       '',
       `Student: ${student.name || student.roll_no}`,
-      `Overall Performance: ${performance.marksSummary.marksPercent}%`,
-    ]
-    : 'No performance data available';
+      `Total Marked Papers: ${testsCount}`,
+      `Average: ${performance.marksSummary.marksPercent}%`,
+      `Highest: ${percentages.length ? formatPercent(Math.max(...percentages)) : '-'}%`,
+      `Lowest: ${percentages.length ? formatPercent(Math.min(...percentages)) : '-'}%`,
+      `Latest: ${percentages.length ? formatPercent(percentages[percentages.length - 1]) : '-'}%`,
+    ];
+  }
+
   if (options.sendMessage !== false) {
-    await sendWhatsAppNotification({
+    const summaryResult = await sendWhatsAppNotification({
       studentId: student.id,
       phone,
       type: 'performance_report',
       message: Array.isArray(message) ? compactWhatsAppMessage(message) : message,
       eventKey: `performance_report_text:${student.id}:${Date.now()}`,
     });
+    console.log('[PERFORMANCE] summary message API response', { resolvedStudentId: student.id, result: summaryResult });
   }
 
   try {
     if (!hasPerformanceRows) return { graph: null, performance, coaching };
     const reportStudent = { ...student, ...performance.studentDetails };
-    const percentages = performance.progressSeries
-      .map((item) => Number(item.percent))
-      .filter(Number.isFinite);
     const academicYear = new Date().getMonth() >= 5
       ? `${new Date().getFullYear()}-${String(new Date().getFullYear() + 1).slice(-2)}`
       : `${new Date().getFullYear() - 1}-${String(new Date().getFullYear()).slice(-2)}`;
@@ -993,13 +1027,14 @@ async function sendPerformanceGraph(student, phone, coaching = null, options = {
       contentType: 'application/pdf',
       folder: 'whatsapp/performance',
     });
-    await sendDocumentNotification(student.id, phone, graph.publicUrl, `performance-${student.roll_no}.pdf`, 'Performance graph attached below.', {
+    const documentResult = await sendDocumentNotification(student.id, phone, graph.publicUrl, `performance-${student.roll_no}.pdf`, 'Performance graph attached below.', {
       type: 'performance_graph',
       eventKey: `performance_graph:${student.id}:${Date.now()}`,
     });
+    console.log('[PERFORMANCE] graph document send API response', { resolvedStudentId: student.id, fileUrl: graph.publicUrl, result: documentResult });
     return { graph, performance, coaching };
   } catch (error) {
-    console.error('Performance graph send failed', { studentId: student.id, error: error.message });
+    console.error('[PERFORMANCE] graph generation/send failed', { studentId: student.id, error: error.message });
     return { graph: null, performance, coaching, error: error.message };
   }
 }
@@ -1265,7 +1300,7 @@ async function createMonthlyReportAndSend({ student, coaching, phone, monthKey }
     `Roll No: ${student.roll_no}`,
     `Attendance: ${attendancePercent}%`,
     `Total Tests: ${performance.marked.length}`,
-    Number(performance.marksSummary.papersCount || 0) > 0
+    Number(performance.marksSummary.testsCount || 0) > 0
       ? `Average Marks: ${performance.marksSummary.marksPercent}%`
       : 'No performance data available',
     `Pending Fees: Rs. ${formatAmount(pending?.pending_amount)}`,
@@ -1406,31 +1441,11 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
     } else if (normalizedOption === 'PERFORMANCE') {
       console.log('Before PERFORMANCE block');
       console.log('[HANDLER] Enter PERFORMANCE');
-      const performance = await buildStudentPerformance(student.coaching_id, student.branch_id, student.id);
-      const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
-      const average = Number(performance.marksSummary.papersCount || 0) > 0 ? performance.marksSummary.marksPercent : '0';
-      const highest = percentages.length ? formatPercent(Math.max(...percentages)) : '0';
-      const latest = percentages.length ? formatPercent(percentages[percentages.length - 1]) : '0';
-      const notificationResult = await sendWhatsAppNotification({
-        studentId: student.id,
-        phone,
-        type: 'parent_menu_performance_report',
-        message: compactWhatsAppMessage([
-          '📈 Performance Report',
-          '',
-          'Overall:',
-          `${average}%`,
-          'Highest:',
-          `${highest}%`,
-          'Latest:',
-          `${latest}%`,
-          '',
-          'Graph attached.',
-        ]),
-        eventKey: `parent_menu_performance_report:${student.id}:${Date.now()}`,
-      });
-      console.log('[WHATSAPP] Performance report result:', notificationResult);
-      const graphResult = await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
+      // sendPerformanceGraph is the single source for both the summary text and the
+      // graph attachment (previously this handler built its own separate summary text
+      // here, using the wrong papersCount gate, while sendPerformanceGraph's own summary
+      // was suppressed — two divergent, easy-to-desync code paths for one reply).
+      const graphResult = await sendPerformanceGraph(student, phone, coaching);
       console.log('[WHATSAPP] Performance graph result:', graphResult);
       await saveParentSession({
         coachingId: student.coaching_id,
