@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Kartik's premium personal portfolio for AI engineering, full-stack development, and automation."
+    />
+    <title>Kartik | AI Engineer & Full Stack Developer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="loader" data-loader aria-label="Loading portfolio">
+      <span></span>
+    </div>
+    <div class="cursor-glow" data-cursor-glow></div>
+    <canvas class="particle-field" data-particles aria-hidden="true"></canvas>
+
+    <header class="navbar" data-navbar>
+      <a class="brand" href="#hero" aria-label="Kartik portfolio home">
+        <span class="brand-mark"></span>
+        <span>Kartik</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#projects">Projects</a>
+        <a href="#about">About</a>
+        <a href="#skills">Skills</a>
+        <a href="#timeline">Timeline</a>
+        <a href="#contact">Contact</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero section" id="hero">
+        <div class="hero-copy reveal">
+          <p class="kicker">Available for ambitious builds</p>
+          <h1>Kartik</h1>
+          <p class="role">AI Engineer • Full Stack Developer • Automation Builder</p>
+          <p class="intro">
+            I build intelligent products that feel calm, fast, and inevitable.<br />
+            From AI workflows to polished web systems, I turn rough ideas into
+            production-grade experiences.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#projects">Explore Work</a>
+            <a class="button secondary" href="mailto:hello@example.com">hello@example.com</a>
+          </div>
+        </div>
+
+        <div class="hero-showcase reveal" data-tilt-zone aria-label="Interactive project preview">
+          <div class="orbit-ring"></div>
+          <article class="floating-card card-one" data-tilt-card>
+            <span>AI Systems</span>
+            <strong>Autonomous workflows</strong>
+            <small>Prompt chains • Agents • Tools</small>
+          </article>
+          <article class="floating-card card-two" data-tilt-card>
+            <span>Product UI</span>
+            <strong>Interfaces that convert</strong>
+            <small>Motion • Detail • Speed</small>
+          </article>
+          <article class="floating-card card-three" data-tilt-card>
+            <span>Automation</span>
+            <strong>Operations on rails</strong>
+            <small>APIs • Scripts • Dashboards</small>
+          </article>
+        </div>
+      </section>
+
+      <section class="section project-section" id="projects">
+        <div class="section-label reveal">
+          <span>01</span>
+          <p>Featured projects</p>
+        </div>
+        <div class="section-heading reveal">
+          <h2>Selected work, synced automatically.</h2>
+          <p>
+            Projects are loaded from <code>/data/projects.json</code>. Add a new object
+            there and it appears here on the next reload.
+          </p>
+        </div>
+        <div class="project-stack" id="projectsStack" aria-live="polite"></div>
+        <p class="state-text" id="projectsStatus">Loading projects...</p>
+      </section>
+
+      <section class="section about-section" id="about">
+        <div class="section-label reveal">
+          <span>02</span>
+          <p>About</p>
+        </div>
+        <div class="about-grid">
+          <div class="section-heading reveal">
+            <h2>Quiet execution. Sharp product instincts.</h2>
+          </div>
+          <div class="about-card reveal">
+            <p>
+              I like software that removes friction. The kind where the interface
+              disappears, the system does the heavy lifting, and every detail has
+              been considered before the user notices it.
+            </p>
+            <div class="skill-marquee" aria-label="Core strengths">
+              <span>AI workflows</span>
+              <span>Full-stack apps</span>
+              <span>Automation</span>
+              <span>Mobile utilities</span>
+              <span>Product systems</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section skills-section" id="skills">
+        <div class="section-label reveal">
+          <span>03</span>
+          <p>Skills</p>
+        </div>
+        <div class="section-heading reveal">
+          <h2>Built around practical depth.</h2>
+        </div>
+        <div class="skill-groups reveal" aria-label="Categorized skills">
+          <article>
+            <h3>AI</h3>
+            <div><span>LLM Apps</span><span>Agents</span><span>Prompt Systems</span></div>
+          </article>
+          <article>
+            <h3>Web</h3>
+            <div><span>HTML</span><span>CSS</span><span>JavaScript</span><span>React</span><span>Next.js</span></div>
+          </article>
+          <article>
+            <h3>Mobile</h3>
+            <div><span>Flutter</span><span>Kotlin</span><span>Android</span></div>
+          </article>
+          <article>
+            <h3>Backend</h3>
+            <div><span>Node.js</span><span>Express</span><span>REST</span><span>SQLite</span></div>
+          </article>
+          <article>
+            <h3>Automation</h3>
+            <div><span>Workflows</span><span>Scripts</span><span>Integrations</span></div>
+          </article>
+          <article>
+            <h3>DevOps</h3>
+            <div><span>Vercel</span><span>Git</span><span>Deployments</span></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section timeline-section" id="timeline">
+        <div class="section-label reveal">
+          <span>04</span>
+          <p>Timeline</p>
+        </div>
+        <div class="section-heading reveal">
+          <h2>A simple path: learn, build, refine, ship.</h2>
+        </div>
+        <div class="timeline">
+          <article class="timeline-item reveal">
+            <span>Now</span>
+            <h3>AI product engineering</h3>
+            <p>Building useful AI workflows, polished interfaces, and automation layers.</p>
+          </article>
+          <article class="timeline-item reveal">
+            <span>Recent</span>
+            <h3>Full-stack systems</h3>
+            <p>Designed practical dashboards, portals, data flows, and admin experiences.</p>
+          </article>
+          <article class="timeline-item reveal">
+            <span>Foundation</span>
+            <h3>Mobile and web craft</h3>
+            <p>Focused on performance, responsiveness, and clean implementation habits.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section contact-section" id="contact">
+        <div class="contact-card reveal">
+          <div>
+            <p class="kicker">Contact</p>
+            <h2>Let’s build something precise.</h2>
+            <div class="contact-links">
+              <a href="mailto:hello@example.com">Email</a>
+              <a href="https://github.com/" target="_blank" rel="noreferrer">GitHub</a>
+              <a href="https://linkedin.com/" target="_blank" rel="noreferrer">LinkedIn</a>
+            </div>
+          </div>
+          <a class="button primary large" href="mailto:hello@example.com">Start a Project</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>© 2026 Kartik. Built with vanilla HTML, CSS, and JavaScript.</p>
+    </footer>
+
+    <dialog class="project-modal" id="projectModal" aria-labelledby="modalTitle">
+      <button class="modal-close" type="button" data-close-modal aria-label="Close project details">×</button>
+      <div class="modal-content" id="modalContent"></div>
+    </dialog>
+
+    <script src="./script.js" defer></script>
+  </body>
+</html>

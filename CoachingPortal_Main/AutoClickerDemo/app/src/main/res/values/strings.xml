@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">Auto Clicker Demo</string>
+    <string name="main_title">Simple Auto Clicker</string>
+    <string name="main_description">Overlay permission do, accessibility service enable karo, phir floating target ko screen par jahan chaho rakho aur auto tap start karo.</string>
+    <string name="interval_hint">Tap interval (ms)</string>
+    <string name="grant_overlay_permission">Grant overlay permission</string>
+    <string name="open_accessibility_settings">Open accessibility settings</string>
+    <string name="show_overlay">Show floating overlay</string>
+    <string name="hide_overlay">Hide overlay</string>
+    <string name="start_clicking">Start auto tap</string>
+    <string name="stop_clicking">Stop auto tap</string>
+    <string name="close_overlay">Close overlay</string>
+    <string name="status_idle">Idle (%1$d ms)</string>
+    <string name="status_running">Running (%1$d ms)</string>
+    <string name="drag_handle">Drag me</string>
+    <string name="overlay_permission_needed">Overlay permission pehle enable karo.</string>
+    <string name="overlay_permission_already_granted">Overlay permission already enabled hai.</string>
+    <string name="accessibility_settings_failed">Accessibility settings nahi khul paayi.</string>
+    <string name="enable_accessibility_first">Accessibility service pehle enable karo.</string>
+    <string name="notification_text">Floating auto tap control active hai.</string>
+    <string name="notification_channel_name">Auto click controls</string>
+    <string name="accessibility_service_name">Auto Click Accessibility</string>
+    <string name="accessibility_service_description">Screen par selected point par repeated taps dispatch karta hai.</string>
+</resources>

@@ -1,0 +1,14 @@
+ALTER TABLE fees
+ADD COLUMN IF NOT EXISTS receipt_number VARCHAR(40);
+
+ALTER TABLE fees
+ADD COLUMN IF NOT EXISTS receipt_file_url TEXT;
+
+ALTER TABLE fees
+ADD COLUMN IF NOT EXISTS receipt_storage_key TEXT;
+
+ALTER TABLE fees
+ADD COLUMN IF NOT EXISTS receipt_storage_type VARCHAR(20);
+
+ALTER TABLE fees
+ADD COLUMN IF NOT EXISTS receipt_generated_at TIMESTAMPTZ;

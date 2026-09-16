@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.brandName || coaching?.name || 'Demo Coaching' %> - Legal Acceptance</title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body style="<%= branding?.cssVars || '' %>">
+  <div class="container wide legal-shell">
+    <div class="topbar card">
+      <div class="brand-lockup">
+        <% if (branding?.logoUrl) { %>
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
+        <% } %>
+        <div>
+          <p class="eyebrow"><%= branding?.brandName || coaching?.name || branding?.portalLabel || 'Coaching Portal' %></p>
+          <h1>Legal Agreement Required</h1>
+          <p class="muted">This is shown only on first admin login. Please review and accept the Terms and Conditions and Privacy Policy to continue.</p>
+        </div>
+      </div>
+      <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary">Logout</button></form>
+    </div>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <div class="legal-docs">
+      <section class="card legal-doc">
+        <h2>Terms and Conditions</h2>
+        <h3>1. Acceptance of Terms</h3>
+        <p>By accessing or using this platform, the coaching institute referred to as the User agrees to comply with these Terms and Conditions.</p>
+
+        <h3>2. Data Storage &amp; Retention Policy</h3>
+        <ul>
+          <li>All student-related data including personal details, attendance, test records, and uploaded files is stored securely.</li>
+          <li>Student and batch data will be automatically deleted after 2 years from completion of 12th class or completion of the enrolled course such as JEE or NEET, whichever occurs first.</li>
+          <li>Once deleted, data cannot be recovered.</li>
+          <li>The coaching institute is responsible for backing up important data before this period ends.</li>
+        </ul>
+
+        <h3>3. User Responsibilities</h3>
+        <ul>
+          <li>The coaching institute is responsible for maintaining accurate student data.</li>
+          <li>Admin login credentials must be handled securely.</li>
+          <li>Lawful use of the platform is required at all times.</li>
+          <li>Sharing admin access with unauthorized persons is strongly discouraged.</li>
+        </ul>
+
+        <h3>4. Data Accuracy</h3>
+        <p>The platform does not verify the correctness of student entries, marks, or attendance. Any incorrect data remains the responsibility of the user.</p>
+
+        <h3>5. Subscription &amp; Access</h3>
+        <p>Access depends on the selected subscription plan. If the subscription expires, access may be restricted while data remains stored temporarily as per the retention policy.</p>
+
+        <h3>6. File Uploads &amp; Storage</h3>
+        <p>Users may upload test papers, notes, and student submissions. The platform is not responsible for lost or corrupted uploads caused by third-party storage failures. Illegal or unauthorized copyrighted content should not be uploaded.</p>
+
+        <h3>7. Account Security</h3>
+        <p>The platform is not liable for unauthorized access caused by weak passwords or credential sharing.</p>
+
+        <h3>8. Service Availability</h3>
+        <p>The platform may occasionally be unavailable due to maintenance, server downtime, or third-party service issues. There is no guarantee of 100 percent uptime.</p>
+
+        <h3>9. Limitation of Liability</h3>
+        <p>The platform is provided as is. We are not responsible for data loss beyond stated policies, business losses, or downtime-related losses.</p>
+
+        <h3>10. Termination</h3>
+        <p>Accounts may be suspended or terminated if terms are violated or misuse or illegal activity is detected.</p>
+
+        <h3>11. Modifications</h3>
+        <p>These terms may be updated at any time. Continued use means acceptance of updated terms.</p>
+
+        <h3>12. Contact</h3>
+        <p>For any queries or issues, contact the platform administrator.</p>
+      </section>
+
+      <section class="card legal-doc">
+        <h2>Portal Usage Agreement</h2>
+        <h3>1. Service Description</h3>
+        <p>This portal provides tools for SHIV CHHATRAPATI CLASSES to manage students, attendance, fees, and academic records.</p>
+
+        <h3>2. License</h3>
+        <ul>
+          <li>Users are granted a limited, non-transferable license.</li>
+          <li>You do not own the software.</li>
+        </ul>
+
+        <h3>3. Usage Restrictions</h3>
+        <ul>
+          <li>No reverse engineering of the platform.</li>
+          <li>No copying or reselling of the software.</li>
+          <li>No illegal use of the service.</li>
+        </ul>
+
+        <h3>4. Data Ownership</h3>
+        <p>Users own their data. The platform only stores and processes it.</p>
+
+        <h3>5. Data Deletion Policy</h3>
+        <p>Data is automatically deleted after 2 years according to the retention rules. No recovery is possible after deletion.</p>
+
+        <h3>6. Service Availability</h3>
+        <p>The service may experience downtime. Uninterrupted access is not guaranteed.</p>
+
+        <h3>7. Access Terms</h3>
+        <p>Access may be restricted if misuse, unauthorized access, or operational risk is detected.</p>
+
+        <h3>8. Limitation of Liability</h3>
+        <p>We are not liable for data loss beyond stated policies, financial losses, business losses, or service downtime.</p>
+
+        <h3>9. Termination</h3>
+        <p>Accounts may be suspended if terms are violated or illegal activity is detected.</p>
+
+        <h3>10. Modifications</h3>
+        <p>Features and policies may change as the institute updates its operational process.</p>
+
+        <h3>11. Governing Law</h3>
+        <p>This agreement is governed by applicable local laws.</p>
+      </section>
+
+      <section class="card legal-doc">
+        <h2>Privacy Policy</h2>
+        <h3>1. Data Storage</h3>
+        <p>Data is stored securely using third-party cloud services. Basic security practices are implemented, but no system is 100 percent secure.</p>
+
+        <h3>2. Data Retention Policy</h3>
+        <p>Student and batch data is stored only for operational use. Automatic deletion occurs after 2 years from completion of 12th class or completion of the enrolled course. Deleted data cannot be recovered.</p>
+
+        <h3>3. User Responsibility</h3>
+        <p>Users must ensure data entered is accurate and should not upload sensitive or illegal content.</p>
+
+        <h3>4. Cookies</h3>
+        <p>Basic cookies may be used for login sessions only. No advertising or tracking cookies are used.</p>
+
+        <h3>5. Third-Party Services</h3>
+        <p>The platform may use cloud storage providers and database providers. We are not responsible for failures of third-party services.</p>
+
+        <h3>6. Data Security</h3>
+        <p>Passwords are encrypted and access is restricted based on user roles.</p>
+
+        <h3>7. Changes to Policy</h3>
+        <p>This policy may be updated at any time.</p>
+
+        <h3>8. Contact</h3>
+        <p>For any concerns, contact the platform administrator.</p>
+      </section>
+    </div>
+
+    <form method="post" action="/admin/legal/accept" class="card legal-acceptance-form">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+      <label class="checkbox-row"><input type="checkbox" name="acceptTerms" required /> I agree to the Terms and Conditions</label>
+      <label class="checkbox-row"><input type="checkbox" name="acceptPrivacy" required /> I agree to the Privacy Policy</label>
+      <label class="checkbox-row"><input type="checkbox" name="acceptPortal" required /> I agree to the Portal Usage Agreement</label>
+      <button type="submit" class="btn">Accept and Continue</button>
+    </form>
+  </div>
+</body>
+</html>

@@ -1,0 +1,18 @@
+[
+  {
+    "title": "EduSync Coaching Portal",
+    "description": "A production-focused coaching institute portal with admin, student, fees, attendance, and progress workflows.",
+    "image": "./public/edusync-logo.png",
+    "techStack": ["Node.js", "Express", "EJS", "SQLite"],
+    "github": "https://github.com/",
+    "demo": "https://example.com"
+  },
+  {
+    "title": "Android Auto Clicker",
+    "description": "An Android accessibility utility prototype with overlay controls and configurable click automation.",
+    "image": "",
+    "techStack": ["Kotlin", "Android", "Accessibility Service"],
+    "github": "https://github.com/",
+    "demo": "https://example.com"
+  }
+]

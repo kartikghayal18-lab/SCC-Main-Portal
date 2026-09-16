@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.brandName || 'Demo Coaching' %> - Apply for Trial</title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body style="<%= branding?.cssVars || '' %>">
+  <div class="container wide auth-page">
+    <div class="auth-layout">
+      <section class="card auth-panel auth-panel--hero login-hero">
+        <div>
+          <p class="eyebrow">Trial Access</p>
+          <h1>Apply for Trial</h1>
+          <p class="muted auth-lead">Share your coaching details. The owner reviews your request manually and activates the portal if approved.</p>
+
+          <div class="hero-chip-row">
+            <span class="info-chip">Manual Review</span>
+            <span class="info-chip">Branding Ready</span>
+            <span class="info-chip"><%= branding?.portalLabel || 'Coaching Portal' %></span>
+          </div>
+        </div>
+
+        <div class="feature-list">
+          <article class="feature-item">
+            <span class="feature-kicker">What You Share</span>
+            <strong>Class name, contact details, student count, and optional logo for your portal identity.</strong>
+          </article>
+          <article class="feature-item">
+            <span class="feature-kicker">What Happens Next</span>
+            <strong>Once approved, the owner can create your coaching code and send login details manually.</strong>
+          </article>
+        </div>
+      </section>
+
+      <div class="auth-column">
+        <% if (flash) { %>
+          <div class="alert <%= flash.type %>"><%= flash.text %></div>
+        <% } %>
+
+        <form method="post" action="/trial/apply" class="card auth-form">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <div class="form-title-row">
+            <div>
+              <p class="eyebrow">Trial Form</p>
+              <h2>Request Your Portal</h2>
+            </div>
+          </div>
+
+          <label>Class Name</label>
+          <input type="text" name="className" placeholder="Shiv Chhatrapati Classes" required />
+
+          <label>Your Name</label>
+          <input type="text" name="applicantName" placeholder="Dnyaneshwar Nawle" required />
+
+          <label>Contact Number</label>
+          <input type="text" name="contactPhone" placeholder="9876543210" required />
+
+          <label>Email Address</label>
+          <input type="email" name="email" placeholder="you@example.com" required />
+
+          <label>WhatsApp Number</label>
+          <input type="text" name="whatsappNumber" placeholder="9876543210" required />
+
+          <label>How Many Students Do You Have?</label>
+          <input type="number" min="1" step="1" name="studentRequirement" placeholder="500" required />
+
+          <label>Logo URL (optional)</label>
+          <input type="url" name="logoUrl" placeholder="https://example.com/logo.png" />
+
+          <button type="submit" class="btn">Submit Trial Request</button>
+          <a href="/login" class="mini-link">Back to Login</a>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

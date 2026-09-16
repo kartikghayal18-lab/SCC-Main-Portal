@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.ownerLoginTitle || ((branding?.brandName || 'Demo Coaching') + ' Owner Login') %></title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body style="<%= branding?.cssVars || '' %>">
+  <div class="container wide auth-page">
+    <div class="auth-layout auth-layout--owner">
+      <section class="card auth-panel auth-panel--hero login-hero">
+        <div>
+          <p class="eyebrow">Private Owner Access</p>
+          <h1><%= branding?.ownerConsoleLabel || ((branding?.brandName || 'Demo Coaching') + ' Control') %></h1>
+          <p class="muted auth-lead">Manage coachings, seat limits, subscription status, branding, and trial approvals from one control room.</p>
+
+          <div class="hero-chip-row">
+            <span class="info-chip">Tenant Control</span>
+            <span class="info-chip">Branding</span>
+            <span class="info-chip">Subscriptions</span>
+          </div>
+        </div>
+
+        <div class="feature-list">
+          <article class="feature-item">
+            <span class="feature-kicker">Single Source</span>
+            <strong>Create coaching portals, update limits, and keep every tenant isolated on the same platform.</strong>
+          </article>
+          <article class="feature-item">
+            <span class="feature-kicker">Owner Only</span>
+            <strong>This screen is hidden from the standard login flow and is intended for private platform management.</strong>
+          </article>
+        </div>
+      </section>
+
+      <div class="auth-column">
+        <% if (flash) { %>
+          <div class="alert <%= flash.type %>"><%= flash.text %></div>
+        <% } %>
+
+        <form method="post" action="/owner/login" class="card auth-form">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <div class="form-title-row">
+            <div>
+              <p class="eyebrow">Owner Login</p>
+              <h2>Secure Sign In</h2>
+            </div>
+          </div>
+
+          <label>Owner Username</label>
+          <input type="text" name="username" placeholder="Enter owner username" required />
+
+          <label>Password</label>
+          <input type="password" name="password" placeholder="Enter owner password" required />
+
+          <label>Security Check: <%= captcha.prompt %> = ?</label>
+          <input type="text" name="captchaAnswer" inputmode="numeric" placeholder="Enter answer" required />
+
+          <button type="submit" class="btn">Login</button>
+          <a href="/owner/forgot-password" class="mini-link">Forgot owner password?</a>
+          <a href="/login" class="mini-link">Back to coaching login</a>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

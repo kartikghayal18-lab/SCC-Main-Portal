@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= branding?.brandName || coaching?.name || 'Demo Coaching' %> - Subscription Status</title>
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body style="<%= branding?.cssVars || '' %>">
+  <div class="container small">
+    <div class="card login-hero">
+      <div class="brand-lockup">
+        <% if (branding?.logoUrl) { %>
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
+        <% } %>
+        <div>
+          <p class="eyebrow">Subscription Notice</p>
+          <h1><%= subscriptionState.blockedTitle %></h1>
+          <p class="muted"><strong><%= branding?.brandName || coaching?.name || user.coachingName || branding?.portalLabel || 'Coaching Portal' %></strong></p>
+        </div>
+      </div>
+    </div>
+
+    <section class="card blocked-card">
+      <p><%= subscriptionState.blockedMessage %></p>
+      <% if (subscriptionState.endsAt) { %>
+        <p class="muted">Subscription end date: <strong><%= subscriptionState.endsAt %></strong></p>
+      <% } %>
+      <p class="muted">Student access is paused until the coaching renews the subscription.</p>
+      <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+        <button type="submit" class="btn">Back to Login</button>
+      </form>
+    </section>
+  </div>
+</body>
+</html>

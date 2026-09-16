@@ -1,0 +1,52 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - img "Edusync logo" [ref=e7]
+        - generic [ref=e8]:
+          - paragraph [ref=e9]: Coaching Platform
+          - heading "Edusync" [level=1] [ref=e10]
+      - paragraph [ref=e11]: One portal for every coaching. Admins and students open only their own dashboard using the coaching code.
+      - generic [ref=e12]:
+        - generic [ref=e13]: Multi Coaching SaaS
+        - generic [ref=e14]: Student Papers + Fees
+        - generic [ref=e15]: Attendance + Notes
+    - generic [ref=e16]:
+      - article [ref=e17]:
+        - generic [ref=e18]: For Admin
+        - strong [ref=e19]: Student list, papers, attendance, fees, answer upload windows, and class links in one place.
+      - article [ref=e20]:
+        - generic [ref=e21]: For Students
+        - strong [ref=e22]: Open papers, check attendance, pending fees, notes, and progress without switching apps.
+      - article [ref=e23]:
+        - generic [ref=e24]: For Each Coaching
+        - strong [ref=e25]: Separate login, separate data, separate branding, same website.
+  - generic [ref=e26]:
+    - generic [ref=e27]:
+      - generic [ref=e29]:
+        - paragraph [ref=e30]: Sign In
+        - heading "Open Your Portal" [level=2] [ref=e31]
+      - generic [ref=e32]: Login Type
+      - combobox [ref=e33]:
+        - option "Coaching Admin" [selected]
+        - option "Student"
+      - generic [ref=e34]:
+        - generic [ref=e35]: Coaching Code
+        - textbox "e.g. alpha-jee-academy" [ref=e36]
+      - generic [ref=e37]: Admin Username
+      - textbox "Enter admin username" [ref=e38]
+      - generic [ref=e39]: Password
+      - textbox "Enter admin password" [ref=e40]
+      - paragraph
+      - generic [ref=e41]: "Security Check: 6 + 3 = ?"
+      - textbox "Enter answer" [ref=e42]
+      - button "Login" [ref=e43] [cursor=pointer]
+      - link "Forgot admin password?" [ref=e44] [cursor=pointer]:
+        - /url: /admin/forgot-password
+    - generic [ref=e45]:
+      - generic [ref=e47]:
+        - paragraph [ref=e48]: New Coaching
+        - heading "Need a Trial Portal?" [level=2] [ref=e49]
+      - paragraph [ref=e50]: Apply for a manual trial account. Share your coaching details and the owner can review and activate your portal.
+      - link "Apply for Trial" [ref=e51] [cursor=pointer]:
+        - /url: /trial/apply
