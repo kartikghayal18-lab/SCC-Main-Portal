@@ -2,3 +2,16 @@ node_modules/
 .env
 .DS_Store
 npm-debug.log*
+cd ~/Desktop/CoachingPortal_Main
+
+printf "\nPROJECT FOLDER:\n"
+pwd
+
+printf "\nGIT ROOT:\n"
+git rev-parse --show-toplevel
+
+printf "\nPROJECT GIT FOLDER:\n"
+ls -ld .git 2>/dev/null || echo "No .git inside CoachingPortal_Main"
+
+printf "\nDESKTOP GIT FOLDER:\n"
+ls -ld ../.git 2>/dev/null || echo "No .git directly inside Desktop"

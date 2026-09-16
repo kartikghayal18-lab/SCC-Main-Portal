@@ -359,10 +359,16 @@ function validateBulkPaperExcelColumns(normalizedHeaders) {
   }
 }
 
-// Roll Number and Checked File are read as raw trimmed strings on purpose (never
-// through parseOmrNumber) — the source Excel can contain leading zeros, stray
-// question marks, or other formatting artifacts in those two columns, and turning
-// them into numbers would silently corrupt the exact-match keys this import relies on.
+// Checked File is read as a raw trimmed string on purpose (never through
+// parseOmrNumber) — it must match an uploaded filename exactly. Roll Number is
+// also read as a string, not a number (to preserve leading zeros), but some
+// source Excel exports corrupt its leading characters into literal '?' marks
+// (e.g. "???????75"); the actual roll number is whatever digits remain, so we
+// strip everything but digits rather than rejecting the value outright.
+function extractRollNumberDigits(value) {
+  return String(value || '').replace(/[^\d]/g, '');
+}
+
 function toBulkPaperExcelRows(fileBuffer) {
   const sheetRows = parseXlsxRows(fileBuffer);
   const headers = sheetRows.shift() || [];
@@ -382,7 +388,7 @@ function toBulkPaperExcelRows(fileBuffer) {
     return {
       rowNumber: index + 2,
       studentName: getOmrValue(raw, ['Student']),
-      rollNo: getOmrValue(raw, ['Roll Number', 'Roll No']),
+      rollNo: extractRollNumberDigits(getOmrValue(raw, ['Roll Number', 'Roll No'])),
       paperCode: getOmrValue(raw, ['Paper Code']),
       checkedFile: getOmrValue(raw, ['Checked File']),
       physicsMarks: parseOmrNumber(getOmrValue(raw, ['Physics'])),
