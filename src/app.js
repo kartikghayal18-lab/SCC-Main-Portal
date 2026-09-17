@@ -167,160 +167,22 @@ function getCurrentMonthValue() {
   return `${year}-${month}`;
 }
 
-function normalizeOmrHeader(value) {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function parseCsvRows(buffer) {
-  const text = buffer.toString('utf8').replace(/^\uFEFF/, '');
-  const rows = [];
-  let row = [];
-  let value = '';
-  let quoted = false;
-
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    const next = text[index + 1];
-    if (quoted && char === '"' && next === '"') {
-      value += '"';
-      index += 1;
-    } else if (char === '"') {
-      quoted = !quoted;
-    } else if (!quoted && char === ',') {
-      row.push(value);
-      value = '';
-    } else if (!quoted && (char === '\n' || char === '\r')) {
-      if (char === '\r' && next === '\n') index += 1;
-      row.push(value);
-      if (row.some((cell) => String(cell || '').trim())) rows.push(row);
-      row = [];
-      value = '';
-    } else {
-      value += char;
-    }
-  }
-  row.push(value);
-  if (row.some((cell) => String(cell || '').trim())) rows.push(row);
-  return rows;
-}
-
-function readZipEntries(buffer) {
-  const entries = [];
-  let offset = buffer.length - 22;
-  while (offset >= 0 && buffer.readUInt32LE(offset) !== 0x06054b50) offset -= 1;
-  if (offset < 0) throw new Error('Invalid ZIP file');
-  const entryCount = buffer.readUInt16LE(offset + 10);
-  let centralOffset = buffer.readUInt32LE(offset + 16);
-
-  for (let index = 0; index < entryCount; index += 1) {
-    if (buffer.readUInt32LE(centralOffset) !== 0x02014b50) throw new Error('Invalid ZIP directory');
-    const compression = buffer.readUInt16LE(centralOffset + 10);
-    const compressedSize = buffer.readUInt32LE(centralOffset + 20);
-    const fileNameLength = buffer.readUInt16LE(centralOffset + 28);
-    const extraLength = buffer.readUInt16LE(centralOffset + 30);
-    const commentLength = buffer.readUInt16LE(centralOffset + 32);
-    const localHeaderOffset = buffer.readUInt32LE(centralOffset + 42);
-    const fileName = buffer.subarray(centralOffset + 46, centralOffset + 46 + fileNameLength).toString('utf8');
-
-    const localNameLength = buffer.readUInt16LE(localHeaderOffset + 26);
-    const localExtraLength = buffer.readUInt16LE(localHeaderOffset + 28);
-    const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
-    const compressed = buffer.subarray(dataStart, dataStart + compressedSize);
-    let data;
-    if (compression === 0) {
-      data = Buffer.from(compressed);
-    } else if (compression === 8) {
-      data = zlib.inflateRawSync(compressed);
-    } else {
-      throw new Error(`Unsupported ZIP compression method ${compression}`);
-    }
-    if (fileName && !fileName.endsWith('/')) entries.push({ name: fileName, data });
-    centralOffset += 46 + fileNameLength + extraLength + commentLength;
-  }
-
-  return entries;
-}
-
-function decodeXmlText(value) {
-  return String(value || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'");
-}
-
-function parseSheetXml(sheetXml, sharedStrings) {
-  const rows = [];
-  const rowMatches = sheetXml.match(/<row\b[\s\S]*?<\/row>/g) || [];
-  for (const rowXml of rowMatches) {
-    const cells = [];
-    const cellMatches = rowXml.match(/<c\b[\s\S]*?<\/c>/g) || [];
-    for (const cellXml of cellMatches) {
-      const ref = (cellXml.match(/\br="([A-Z]+)\d+"/) || [])[1] || '';
-      const columnIndex = ref.split('').reduce((sum, char) => (sum * 26) + char.charCodeAt(0) - 64, 0) - 1;
-      const type = (cellXml.match(/\bt="([^"]+)"/) || [])[1] || '';
-      const rawValue = decodeXmlText((cellXml.match(/<v[^>]*>([\s\S]*?)<\/v>/) || [])[1] || (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/) || [])[1] || '');
-      const value = type === 's' ? (sharedStrings[Number(rawValue)] || '') : rawValue;
-      cells[columnIndex >= 0 ? columnIndex : cells.length] = value;
-    }
-    if (cells.some((cell) => String(cell || '').trim())) rows.push(cells.map((cell) => cell || ''));
-  }
-  return rows;
-}
-
-function parseXlsxRows(buffer) {
-  const entries = readZipEntries(buffer);
-  const entryByName = new Map(entries.map((entry) => [entry.name.replace(/^\/+/, ''), entry.data]));
-  const sharedXml = entryByName.get('xl/sharedStrings.xml')?.toString('utf8') || '';
-  const sharedStrings = (sharedXml.match(/<si\b[\s\S]*?<\/si>/g) || []).map((item) => decodeXmlText(
-    (item.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
-      .map((part) => (part.match(/<t[^>]*>([\s\S]*?)<\/t>/) || [])[1] || '')
-      .join('')
-  ));
-  const sheetEntry = entries.find((entry) => /^xl\/worksheets\/sheet\d+\.xml$/.test(entry.name));
-  if (!sheetEntry) throw new Error('No worksheet found in XLSX file');
-  return parseSheetXml(sheetEntry.data.toString('utf8'), sharedStrings);
-}
-
-function parseOmrNumber(value) {
-  const cleaned = String(value ?? '').replace(/,/g, '').trim();
-  if (!cleaned) return null;
-  const number = Number(cleaned);
-  return Number.isFinite(number) ? number : null;
-}
-
-function getOmrValue(row, aliases) {
-  for (const alias of aliases) {
-    const value = row[normalizeOmrHeader(alias)];
-    if (value !== undefined && String(value).trim() !== '') return String(value).trim();
-  }
-  return '';
-}
-
-function normalizeOmrRow(row, fallbackMaxMarks = null) {
-  const obtainedMarks = parseOmrNumber(getOmrValue(row, ['Total Marks', 'Correct Marks Total', 'Total Marks Total', 'Obtained Marks', 'Marks Obtained']));
-  const maxMarks = parseOmrNumber(getOmrValue(row, ['Max Marks', 'Maximum Marks', 'Total Maximum Marks', 'Out Of'])) ?? fallbackMaxMarks;
-  const biologyMarks = parseOmrNumber(getOmrValue(row, ['Biology Marks', 'Biology']));
-  return {
-    rollNo: getOmrValue(row, ['Roll No', 'RollNumber', 'Roll Number', 'Roll']),
-    studentName: getOmrValue(row, ['Student Name', 'Name']),
-    barcode: getOmrValue(row, ['Barcode', 'Bar Code']),
-    correctCount: parseOmrNumber(getOmrValue(row, ['Correct Total', 'Correct Count'])),
-    wrongCount: parseOmrNumber(getOmrValue(row, ['Wrong Total', 'Wrong Count'])),
-    unattemptedCount: parseOmrNumber(getOmrValue(row, ['Unattempted Total', 'Unattempted Count', 'Blank Total'])),
-    obtainedMarks,
-    maxMarks,
-    percentage: maxMarks && obtainedMarks !== null ? Number(((obtainedMarks / maxMarks) * 100).toFixed(2)) : parseOmrNumber(getOmrValue(row, ['Percentage', 'Percent'])),
-    physicsMarks: parseOmrNumber(getOmrValue(row, ['Physics Marks', 'Physics'])),
-    chemistryMarks: parseOmrNumber(getOmrValue(row, ['Chemistry Marks', 'Chemistry'])),
-    biologyMarks,
-    botanyMarks: biologyMarks ?? parseOmrNumber(getOmrValue(row, ['Botany Marks', 'Botany'])),
-    zoologyMarks: parseOmrNumber(getOmrValue(row, ['Zoology Marks', 'Zoology'])),
-    rank: parseOmrNumber(getOmrValue(row, ['Rank', 'Student Rank'])),
-    raw: row,
-  };
-}
+// Pure Excel/CSV/XLSX parsing + the roll-number-to-student matching rule are defined
+// once in services/omrImportParsing.js (not here) so they can be unit-tested without
+// booting this whole Express app / DB pool. See scripts/test-omr-import-parsing.js.
+const {
+  normalizeOmrHeader,
+  parseCsvRows,
+  readZipEntries,
+  parseXlsxRows,
+  parseOmrNumber,
+  getOmrValue,
+  normalizeOmrRow,
+  toOmrTableRows,
+  toBulkPaperExcelRows,
+  extractRollNumberDigits,
+  resolveStudentForRollNumber,
+} = require('./services/omrImportParsing');
 
 function sanitizeOmrFileName(value) {
   return String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/\.+/g, '.').slice(0, 160);
@@ -334,115 +196,6 @@ function getOmrStoragePath(testId, rollNo, originalName) {
 
 function getExactSheetRollNo(fileName) {
   return path.parse(fileName || '').name.trim();
-}
-
-const REQUIRED_RESULT_EXCEL_COLUMNS = [
-  { label: 'Roll No', aliases: ['Roll No', 'RollNumber', 'Roll Number', 'Roll'] },
-  { label: 'Student Name', aliases: ['Student Name', 'Name'] },
-  { label: 'Physics Marks', aliases: ['Physics Marks', 'Physics'] },
-  { label: 'Chemistry Marks', aliases: ['Chemistry Marks', 'Chemistry'] },
-  { label: 'Biology Marks', aliases: ['Biology Marks', 'Biology'] },
-  { label: 'Total Marks', aliases: ['Total Marks', 'Correct Marks Total', 'Total Marks Total', 'Obtained Marks', 'Marks Obtained'] },
-];
-
-function validateResultExcelColumns(normalizedHeaders) {
-  const headerSet = new Set(normalizedHeaders.filter(Boolean));
-  const missing = REQUIRED_RESULT_EXCEL_COLUMNS.filter(
-    (column) => !column.aliases.some((alias) => headerSet.has(normalizeOmrHeader(alias)))
-  );
-  if (missing.length) {
-    throw new Error(`Missing required column(s): ${missing.map((column) => column.label).join(', ')}. Required columns: Roll No, Student Name, Physics Marks, Chemistry Marks, Biology Marks, Total Marks.`);
-  }
-}
-
-function toOmrTableRows(fileBuffer, fallbackMaxMarks, fileName = '') {
-  const isXlsx = /\.xlsx$/i.test(fileName || '');
-  const sheetRows = isXlsx ? parseXlsxRows(fileBuffer) : parseCsvRows(fileBuffer);
-  const headers = sheetRows.shift() || [];
-  if (!headers.length) throw new Error(`${isXlsx ? 'Excel' : 'CSV'} header row is missing`);
-  const normalizedHeaders = headers.map(normalizeOmrHeader);
-  validateResultExcelColumns(normalizedHeaders);
-
-  const nonBlankRows = sheetRows.filter(
-    (cells) => Array.isArray(cells) && cells.some((cell) => String(cell || '').trim() !== '')
-  );
-
-  return nonBlankRows.map((cells, index) => {
-    const raw = {};
-    normalizedHeaders.forEach((header, cellIndex) => {
-      raw[header] = cells[cellIndex] || '';
-    });
-    return {
-      rowNumber: index + 2,
-      ...normalizeOmrRow(raw, fallbackMaxMarks),
-    };
-  });
-}
-
-const REQUIRED_BULK_PAPER_EXCEL_COLUMNS = [
-  { label: 'Roll Number', aliases: ['Roll Number', 'Roll No'] },
-  { label: 'Checked File', aliases: ['Checked File'] },
-];
-
-function validateBulkPaperExcelColumns(normalizedHeaders) {
-  const headerSet = new Set(normalizedHeaders.filter(Boolean));
-  const missing = REQUIRED_BULK_PAPER_EXCEL_COLUMNS.filter(
-    (column) => !column.aliases.some((alias) => headerSet.has(normalizeOmrHeader(alias)))
-  );
-  if (missing.length) {
-    throw new Error(`Missing required column(s): ${missing.map((column) => column.label).join(', ')}. Required columns: Student, Roll Number, Paper Code, Physics, Chemistry, Biology, Total Score, Correct, Wrong, Blank, Multi-marked, Checked File.`);
-  }
-}
-
-// Checked File is read as a raw trimmed string on purpose (never through
-// parseOmrNumber) — it must match an uploaded filename exactly.
-//
-// Roll Number is OCR output and is frequently corrupted with leading '?'
-// characters (e.g. "?????775"), or wrapped in label text (e.g. "Roll No:
-// ?????91"). The actual roll number is the LAST contiguous run of digits in
-// that value — not every digit in the string concatenated together, and
-// never the "_0001" / "_0002" sequence number embedded in the uploaded
-// filename, which is just a scan index and is never used as a roll number.
-function extractRollNumberDigits(value) {
-  const digitRuns = String(value || '').match(/\d+/g);
-  if (!digitRuns || !digitRuns.length) return '';
-  return digitRuns[digitRuns.length - 1];
-}
-
-function toBulkPaperExcelRows(fileBuffer) {
-  const sheetRows = parseXlsxRows(fileBuffer);
-  const headers = sheetRows.shift() || [];
-  if (!headers.length) throw new Error('Excel header row is missing');
-  const normalizedHeaders = headers.map(normalizeOmrHeader);
-  validateBulkPaperExcelColumns(normalizedHeaders);
-
-  const nonBlankRows = sheetRows.filter(
-    (cells) => Array.isArray(cells) && cells.some((cell) => String(cell || '').trim() !== '')
-  );
-
-  return nonBlankRows.map((cells, index) => {
-    const raw = {};
-    normalizedHeaders.forEach((header, cellIndex) => {
-      raw[header] = cells[cellIndex] !== undefined ? cells[cellIndex] : '';
-    });
-    const rollNoRaw = getOmrValue(raw, ['Roll Number', 'Roll No']);
-    return {
-      rowNumber: index + 2,
-      studentName: getOmrValue(raw, ['Student']),
-      rollNoRaw,
-      rollNo: extractRollNumberDigits(rollNoRaw),
-      paperCode: getOmrValue(raw, ['Paper Code']),
-      checkedFile: getOmrValue(raw, ['Checked File']),
-      physicsMarks: parseOmrNumber(getOmrValue(raw, ['Physics'])),
-      chemistryMarks: parseOmrNumber(getOmrValue(raw, ['Chemistry'])),
-      biologyMarks: parseOmrNumber(getOmrValue(raw, ['Biology'])),
-      totalScore: parseOmrNumber(getOmrValue(raw, ['Total Score'])),
-      correctCount: parseOmrNumber(getOmrValue(raw, ['Correct'])),
-      wrongCount: parseOmrNumber(getOmrValue(raw, ['Wrong'])),
-      blankCount: parseOmrNumber(getOmrValue(raw, ['Blank'])),
-      multiMarkedCount: parseOmrNumber(getOmrValue(raw, ['Multi-marked', 'Multi Marked', 'MultiMarked'])),
-    };
-  });
 }
 
 function expandOmrSheetFiles(files) {
@@ -3733,9 +3486,23 @@ FROM test_papers tp
   // WhatsApp's buildStudentPerformance; only fall back to the capped recent list (which
   // still lets buildProgressSummaryFromPapers show unmarked paper names as placeholders)
   // when the student has no marks recorded yet at all.
+  console.log('[ADMIN CHART] marked papers for student', {
+    studentId,
+    rowCount: markedPapersForChart.length,
+    testNames: markedPapersForChart.map((paper) => paper.test_label),
+    testDates: markedPapersForChart.map((paper) => paper.upload_date),
+    marks: markedPapersForChart.map((paper) => paper.marks_obtained),
+    maxMarks: markedPapersForChart.map((paper) => paper.max_marks),
+  });
   const { progressSeries, marksSummary } = buildProgressSummaryFromPapers(
     markedPapersForChart.length ? markedPapersForChart : papers
   );
+  console.log('[ADMIN CHART] final chart data', {
+    studentId,
+    labels: progressSeries.map((point) => point.label),
+    percentages: progressSeries.map((point) => point.percent),
+    marksSummary,
+  });
 
   return {
     profile,
@@ -7627,6 +7394,11 @@ app.get('/admin/search-student', requireCoachingAdmin, async (req, res) => {
 });
 
 app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) => {
+  // Fresh data on every load (including a normal reload, not just a hard refresh):
+  // this page is fully server-rendered from a live DB query each request, but without
+  // this header some browsers/proxies can still serve a cached copy of the HTML itself
+  // on back-navigation or reload, which would show a stale performance chart.
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const studentId = Number(req.params.id);
@@ -8026,6 +7798,17 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
 
     sendProgress({ type: 'start', total: excelRows.length });
 
+    // Fetched once and matched in memory (via resolveStudentForRollNumber, shared with
+    // the regression tests in scripts/test-omr-import-parsing.js) instead of a DB query
+    // per row — same pattern /admin/omr/import-results already uses, and it removes any
+    // possibility of the exact-match and numeric-fallback queries disagreeing with what
+    // gets tested.
+    const branchStudents = await all(
+      `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+       FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
+      [coachingId, branchId]
+    );
+
     const uploadedFilesByName = new Map();
     const duplicateUploadedFilenames = new Set();
     for (const file of files) {
@@ -8052,6 +7835,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       if (!row.checkedFile) {
         report.invalidFilename += 1;
         report.details.push({ row: row.rowNumber, rollNo: row.rollNo || '-', file: '(blank)', status: 'invalid_filename', reason: 'Checked File value is blank' });
+        console.log(`[CHECKED PAPER] Skipped: Checked File value is blank (row ${row.rowNumber}, roll ${row.rollNo || '-'})`);
         continue;
       }
       if (!rollKey) {
@@ -8060,47 +7844,43 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
           ? `Could not extract a roll number from Roll Number value "${row.rollNoRaw}" (no digits found)`
           : 'Roll Number is blank';
         report.details.push({ row: row.rowNumber, rollNo: row.rollNoRaw || '-', file: row.checkedFile, status: 'invalid_roll_number', reason });
+        console.log(`[CHECKED PAPER] Skipped: ${reason} (row ${row.rowNumber}, file ${row.checkedFile})`);
         continue;
       }
       if (seenRollKeys.has(rollKey)) {
         report.duplicateMapping += 1;
         report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Duplicate Roll Number "${row.rollNo}" in Excel; only the first occurrence is imported` });
+        console.log(`[CHECKED PAPER] Skipped: duplicate roll number "${row.rollNo}" in Excel (row ${row.rowNumber}, file ${row.checkedFile})`);
         continue;
       }
       if (seenCheckedFiles.has(row.checkedFile)) {
         report.duplicateMapping += 1;
         report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Duplicate Checked File "${row.checkedFile}" reference in Excel; only the first occurrence is imported` });
+        console.log(`[CHECKED PAPER] Skipped: duplicate checked file "${row.checkedFile}" in Excel (row ${row.rowNumber}, roll ${row.rollNo})`);
         continue;
       }
       if (duplicateUploadedFilenames.has(row.checkedFile)) {
         report.duplicateMapping += 1;
         report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Multiple uploaded files share the filename "${row.checkedFile}"; cannot determine which one to use` });
+        console.log(`[CHECKED PAPER] Skipped: multiple uploaded files named "${row.checkedFile}" (row ${row.rowNumber}, roll ${row.rollNo})`);
         continue;
       }
 
-      let student = await get(
-        `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?`,
-        [coachingId, branchId, row.rollNo]
-      );
-      if (!student) {
-        // Numeric-equivalent fallback: a normalized OCR value like "00075" should
-        // still match a stored roll number of "75" (or vice versa). Only applied
-        // when it resolves to exactly one student, so it never silently guesses
-        // between two real, differently-padded roll numbers.
-        const numericMatches = await all(
-          `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
-           FROM users
-           WHERE coaching_id = ? AND branch_id = ? AND role = 'student'
-             AND roll_no ~ '^0*[0-9]+$' AND LTRIM(roll_no, '0') = LTRIM(?, '0')`,
-          [coachingId, branchId, row.rollNo]
-        );
-        if (numericMatches.length === 1) {
-          student = numericMatches[0];
-        }
-      }
+      const { student, matchType } = resolveStudentForRollNumber(row.rollNo, branchStudents);
+      console.log('[BULK PAPER UPLOAD] roll number resolution', {
+        row: row.rowNumber,
+        rollNoRaw: row.rollNoRaw,
+        rollNo: row.rollNo,
+        excelStudentName: row.studentName || null,
+        matchType,
+        resolvedStudentId: student?.id || null,
+        resolvedRollNo: student?.roll_no || null,
+        resolvedStudentName: student?.name || null,
+      });
       if (!student) {
         report.missingStudent += 1;
         report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'missing_student', reason: `No student found for roll number "${row.rollNo}"` });
+        console.log(`[CHECKED PAPER] Skipped: student not found for roll ${row.rollNo} (row ${row.rowNumber}, file ${row.checkedFile})`);
         continue;
       }
 
@@ -8108,7 +7888,14 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       if (!file) {
         report.missingFile += 1;
         report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'missing_file', reason: `No uploaded file matches Checked File "${row.checkedFile}"` });
+        console.log(`[CHECKED PAPER] Skipped: file missing - "${row.checkedFile}" (row ${row.rowNumber}, roll ${row.rollNo}, student_id=${student.id})`);
         continue;
+      }
+
+      const recipientPhone = student.parent_whatsapp_number || student.guardian_phone || student.whatsapp_number || student.contact_phone || null;
+      console.log(`[CHECKED PAPER] Roll ${row.rollNo} → student_id=${student.id} → file=${row.checkedFile} → recipient=${recipientPhone || 'MISSING'}`);
+      if (!recipientPhone) {
+        console.log(`[CHECKED PAPER] Skipped: WhatsApp number missing for student_id=${student.id} (roll ${row.rollNo})`);
       }
 
       seenRollKeys.add(rollKey);
@@ -8183,8 +7970,14 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
             type: row.totalScore !== null && rowMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
           });
           console.log('[BULK PAPER UPLOAD] WhatsApp notify result', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, result: notifyResult });
+          if (notifyResult?.ok) {
+            console.log('[CHECKED PAPER] Sent successfully');
+          } else {
+            console.log(`[CHECKED PAPER] Skipped: WhatsApp send failed for student_id=${student.id} (roll ${row.rollNo}) - ${notifyResult?.reason || notifyResult?.error || 'unknown reason'}`);
+          }
         } catch (notifyErr) {
           console.error('[BULK PAPER UPLOAD] WhatsApp notify threw unexpectedly', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, error: notifyErr.message });
+          console.log(`[CHECKED PAPER] Skipped: WhatsApp send threw for student_id=${student.id} (roll ${row.rollNo}) - ${notifyErr.message}`);
         }
       }
       } finally {
