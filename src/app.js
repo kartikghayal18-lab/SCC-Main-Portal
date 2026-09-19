@@ -21,8 +21,6 @@ const {
   resendWhatsAppLog,
   updateWhatsAppLogStatus,
   logWhatsAppMessage,
-  sendDocumentMessage,
-  sendTemplateMessage,
   sendTextMessage,
 } = require('./services/whatsapp');
 const {
@@ -60,6 +58,13 @@ const {
   verifyReceiptAccessToken,
 } = require('./services/parentAssistant');
 const { buildProgressSummaryFromPapers, getMarkedPapersForStudent } = require('./services/progress');
+const {
+  isReEngagementError,
+  selectPaperRecipients,
+  sendPaperTemplateFallback,
+  deliverPaperDocument,
+} = require('./services/paperWhatsApp');
+const { runCheckedPaperImport } = require('./services/checkedPaperImport');
 const {
   createPerfTrace,
   getGlobalSlowOperations,
@@ -180,8 +185,6 @@ const {
   normalizeOmrRow,
   toOmrTableRows,
   toBulkPaperExcelRows,
-  extractRollNumberDigits,
-  resolveStudentForRollNumber,
 } = require('./services/omrImportParsing');
 
 function sanitizeOmrFileName(value) {
@@ -966,95 +969,6 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
 }
 
 
-function getWhatsAppErrorCode(resultOrError) {
-  return String(
-    resultOrError?.errorCode
-    || resultOrError?.code
-    || resultOrError?.response?.error?.code
-    || resultOrError?.response?.error?.error_subcode
-    || ''
-  );
-}
-
-function isReEngagementError(resultOrError) {
-  const code = getWhatsAppErrorCode(resultOrError);
-  const message = String(resultOrError?.error || resultOrError?.message || resultOrError?.reason || '').toLowerCase();
-  return code === '131047' || message.includes('131047') || message.includes('re-engagement');
-}
-
-function buildPaperTemplateComponents({ recipientName, student, paper, paperUrl, fileName }) {
-  return [
-    {
-      type: 'header',
-      parameters: [
-        { type: 'document', document: { link: paperUrl, filename: fileName || paper.original_name || 'paper.pdf' } },
-      ],
-    },
-    {
-      type: 'body',
-      parameters: [
-        { type: 'text', text: recipientName || student.name || student.roll_no || 'Parent' },
-        { type: 'text', text: student.name || student.roll_no || 'Student' },
-        { type: 'text', text: paper.test_label || paper.original_name || 'Test Paper' },
-        { type: 'text', text: String(paper.marks_obtained ?? '-') },
-        { type: 'text', text: String(paper.max_marks ?? '-') },
-      ],
-    },
-  ];
-}
-
-async function sendPaperTemplateFallback({ coachingId, branchId, student, recipient, document, paperId }) {
-  const templateName = String(process.env.WHATSAPP_PAPER_TEMPLATE_NAME || 'paper_result_notification').trim();
-  const languageCode = String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en').trim();
-  if (!templateName) {
-    console.error('[WHATSAPP TEMPLATE REQUIRED]', { paperId, studentId: student.id, recipient: recipient.key, reason: 'missing template name' });
-    return { ok: false, failed: true, error: 'WhatsApp paper template name is missing' };
-  }
-
-  console.log('[PAPER WHATSAPP TEMPLATE START]', {
-    paperId,
-    studentId: student.id,
-    recipient: recipient.key,
-    templateName,
-    languageCode,
-  });
-
-  const result = await sendTemplateMessage({
-    coachingId,
-    branchId,
-    studentId: student.id,
-    to: recipient.phone,
-    templateName,
-    languageCode,
-    components: buildPaperTemplateComponents({
-      recipientName: recipient.key === 'parent' ? student.parent_name || student.name || 'Parent' : student.name,
-      student,
-      paper: document.paper,
-      paperUrl: document.fileUrl,
-      fileName: document.fileName,
-    }),
-  });
-
-  if (result?.failed || result?.ok === false) {
-    console.error('[PAPER WHATSAPP TEMPLATE FAILED]', {
-      paperId,
-      studentId: student.id,
-      recipient: recipient.key,
-      error: result.error || result.reason || 'Template send failed',
-    });
-    console.error('[WHATSAPP TEMPLATE REQUIRED]', { paperId, studentId: student.id, recipient: recipient.key });
-    return result;
-  }
-
-  console.log('[PAPER WHATSAPP TEMPLATE SENT]', {
-    paperId,
-    studentId: student.id,
-    recipient: recipient.key,
-    metaMessageId: result?.metaMessageId || null,
-  });
-  return result;
-}
-
 async function retryFailedPaperDocumentAsTemplate(metaMessageId) {
   const log = await get(
     `SELECT id, coaching_id, branch_id, student_id, phone_number, message_type, document_url, document_filename, retry_count
@@ -1100,7 +1014,7 @@ async function retryFailedPaperDocumentAsTemplate(metaMessageId) {
   });
 }
 
-async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
+async function notifyPaperEvent({ req, coaching, student, paperId, type, recipientMode = 'all' }) {
   try {
     console.log('[WHATSAPP PAPER] upload hook start', {
       studentId: student.id,
@@ -1139,7 +1053,7 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       studentId: paperStudent.id,
       paperId,
     });
-    if (!studentPhone) {
+    if (!studentPhone && recipientMode !== 'parent') {
       await logWhatsAppMessage({
         coachingId: document.paper.coaching_id || student.coaching_id || null,
         branchId: paperStudent.branch_id || student.branch_id || null,
@@ -1192,95 +1106,41 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       ];
     const compactCaption = compactWhatsAppMessage(caption);
 
-    const recipients = [
-      { key: 'student', phone: studentPhone },
-      { key: 'parent', phone: parentPhone },
-    ].filter((recipient, index, recipientsList) => (
-      recipient.phone && recipientsList.findIndex((item) => item.phone === recipient.phone) === index
-    ));
+    const recipients = selectPaperRecipients(paperStudent, recipientMode);
 
-    for (const recipient of recipients) {
-      const coachingId = document.paper.coaching_id || student.coaching_id || req.session?.user?.coachingId || null;
-      const branchId = paperStudent.branch_id || student.branch_id || getCurrentBranchId(req);
-      try {
-        console.log('[PAPER WHATSAPP NORMAL START]', {
-          recipient: recipient.key,
-          studentId: paperStudent.id,
-          paperId,
-        });
-        const result = await sendDocumentMessage({
-          coachingId,
-          branchId,
-          studentId: paperStudent.id,
-          to: recipient.phone,
-          documentUrl: document.fileUrl,
-          filename: document.fileName,
-          caption: compactCaption,
-        });
-        if (result?.failed || result?.ok === false) {
-          if (isReEngagementError(result)) {
-            console.error('[PAPER WHATSAPP 131047]', {
-              recipient: recipient.key,
-              studentId: paperStudent.id,
-              paperId,
-              error: result.error || 'Re-engagement message',
-            });
-            await sendPaperTemplateFallback({
-              coachingId,
-              branchId,
-              student: paperStudent,
-              recipient,
-              document,
-              paperId,
-            });
-            continue;
-          }
-          console.error('[WHATSAPP PAPER] failed', {
-            recipient: recipient.key,
-            studentId: paperStudent.id,
-            paperId,
-            error: result.error || 'WhatsApp document send failed',
-          });
-          continue;
-        }
-        console.log('[PAPER WHATSAPP NORMAL SENT]', {
-          recipient: recipient.key,
-          studentId: paperStudent.id,
-          paperId,
-          metaMessageId: result?.metaMessageId || null,
-        });
-      } catch (error) {
-        if (isReEngagementError(error)) {
-          console.error('[PAPER WHATSAPP 131047]', {
-            recipient: recipient.key,
-            studentId: paperStudent.id,
-            paperId,
-            error: error.message,
-          });
-          await sendPaperTemplateFallback({
-            coachingId,
-            branchId,
-            student: paperStudent,
-            recipient,
-            document,
-            paperId,
-          });
-        } else {
-          console.error('[WHATSAPP PAPER] failed', {
-            recipient: recipient.key,
-            studentId: paperStudent.id,
-            paperId,
-            error: error.message,
-          });
-        }
-      }
+    if (!recipients.length) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: recipientMode === 'parent' ? 'No parent/guardian WhatsApp number on file' : 'No WhatsApp number on file',
+        fileUrl: document.fileUrl,
+        fileName: document.fileName,
+        results: [],
+      };
+    }
 
-      if (isResult) {
+    const coachingId = document.paper.coaching_id || student.coaching_id || req.session?.user?.coachingId || null;
+    const branchId = paperStudent.branch_id || student.branch_id || getCurrentBranchId(req);
+    const results = await deliverPaperDocument({
+      document,
+      student: paperStudent,
+      recipients,
+      caption: compactCaption,
+      coachingId,
+      branchId,
+      paperId,
+    });
+
+    if (isResult) {
+      for (const outcome of results) {
+        // The performance graph only follows a delivered result message; when the document
+        // itself was rejected (e.g. 24-hour window closed) there is nothing to follow up on.
+        if (!outcome.ok || outcome.channel !== 'document') continue;
         try {
-          await sendPerformanceGraph(paperStudent, recipient.phone, coaching);
+          await sendPerformanceGraph(paperStudent, outcome.phone, coaching);
         } catch (error) {
           console.error('[WHATSAPP PAPER] failed', {
-            recipient: recipient.key,
+            recipient: outcome.key,
             studentId: paperStudent.id,
             paperId,
             error: error.message,
@@ -1289,7 +1149,18 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       }
     }
 
-    return { ok: true, sent: recipients.length };
+    const failedResults = results.filter((outcome) => !outcome.ok);
+    return {
+      // ok means every attempted recipient's message was accepted by the WhatsApp API —
+      // never a blanket true when sends failed.
+      ok: failedResults.length === 0,
+      sent: results.length - failedResults.length,
+      failed: failedResults.length,
+      fileUrl: document.fileUrl,
+      fileName: document.fileName,
+      results,
+      ...(failedResults.length ? { reason: failedResults.map((outcome) => `${outcome.key}: ${outcome.error}`).join('; ') } : {}),
+    };
   } catch (error) {
     console.error('WhatsApp paper/result notification failed', {
       studentId: student.id,
@@ -7772,17 +7643,6 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
   // by upload order/index/timestamp. Without an Excel file, fall back unchanged to
   // the original filename-parsing bulk path below (existing behaviour preserved).
   if (excelFile) {
-    const report = {
-      totalRows: 0,
-      imported: 0,
-      missingStudent: 0,
-      missingFile: 0,
-      invalidFilename: 0,
-      duplicateMapping: 0,
-      failed: 0,
-      details: [],
-    };
-
     let excelRows;
     try {
       excelRows = toBulkPaperExcelRows(excelFile.buffer);
@@ -7798,217 +7658,100 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
 
     sendProgress({ type: 'start', total: excelRows.length });
 
-    // Fetched once and matched in memory (via resolveStudentForRollNumber, shared with
-    // the regression tests in scripts/test-omr-import-parsing.js) instead of a DB query
-    // per row — same pattern /admin/omr/import-results already uses, and it removes any
-    // possibility of the exact-match and numeric-fallback queries disagreeing with what
-    // gets tested.
+    // Fetched once and matched in memory (resolveStudentForRollNumber, called from
+    // services/checkedPaperImport.js) instead of a DB query per row — same pattern
+    // /admin/omr/import-results already uses, and it removes any possibility of the
+    // exact-match and numeric-fallback queries disagreeing with what gets tested.
     const branchStudents = await all(
       `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
        FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
       [coachingId, branchId]
     );
 
-    const uploadedFilesByName = new Map();
-    const duplicateUploadedFilenames = new Set();
-    for (const file of files) {
-      if (uploadedFilesByName.has(file.originalname)) {
-        duplicateUploadedFilenames.add(file.originalname);
-      } else {
-        uploadedFilesByName.set(file.originalname, file);
-      }
-    }
-
-    const seenRollKeys = new Set();
-    const seenCheckedFiles = new Set();
-
-    for (const row of excelRows) {
-      // try/finally wraps the existing per-row logic completely unchanged (every
-      // classification branch below still does exactly what it did before) —
-      // it only guarantees one progress event is emitted per row, on every exit
-      // path (success, any "continue", or an unexpected throw), without having
-      // to duplicate the progress call at each of those exit points individually.
-      try {
-      report.totalRows += 1;
-      const rollKey = String(row.rollNo || '').trim().toLowerCase();
-
-      if (!row.checkedFile) {
-        report.invalidFilename += 1;
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNo || '-', file: '(blank)', status: 'invalid_filename', reason: 'Checked File value is blank' });
-        console.log(`[CHECKED PAPER] Skipped: Checked File value is blank (row ${row.rowNumber}, roll ${row.rollNo || '-'})`);
-        continue;
-      }
-      if (!rollKey) {
-        report.failed += 1;
-        const reason = row.rollNoRaw
-          ? `Could not extract a roll number from Roll Number value "${row.rollNoRaw}" (no digits found)`
-          : 'Roll Number is blank';
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNoRaw || '-', file: row.checkedFile, status: 'invalid_roll_number', reason });
-        console.log(`[CHECKED PAPER] Skipped: ${reason} (row ${row.rowNumber}, file ${row.checkedFile})`);
-        continue;
-      }
-      if (seenRollKeys.has(rollKey)) {
-        report.duplicateMapping += 1;
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Duplicate Roll Number "${row.rollNo}" in Excel; only the first occurrence is imported` });
-        console.log(`[CHECKED PAPER] Skipped: duplicate roll number "${row.rollNo}" in Excel (row ${row.rowNumber}, file ${row.checkedFile})`);
-        continue;
-      }
-      if (seenCheckedFiles.has(row.checkedFile)) {
-        report.duplicateMapping += 1;
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Duplicate Checked File "${row.checkedFile}" reference in Excel; only the first occurrence is imported` });
-        console.log(`[CHECKED PAPER] Skipped: duplicate checked file "${row.checkedFile}" in Excel (row ${row.rowNumber}, roll ${row.rollNo})`);
-        continue;
-      }
-      if (duplicateUploadedFilenames.has(row.checkedFile)) {
-        report.duplicateMapping += 1;
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'duplicate_mapping', reason: `Multiple uploaded files share the filename "${row.checkedFile}"; cannot determine which one to use` });
-        console.log(`[CHECKED PAPER] Skipped: multiple uploaded files named "${row.checkedFile}" (row ${row.rowNumber}, roll ${row.rollNo})`);
-        continue;
-      }
-
-      const { student, matchType } = resolveStudentForRollNumber(row.rollNo, branchStudents);
-      console.log('[BULK PAPER UPLOAD] roll number resolution', {
-        row: row.rowNumber,
-        rollNoRaw: row.rollNoRaw,
-        rollNo: row.rollNo,
-        excelStudentName: row.studentName || null,
-        matchType,
-        resolvedStudentId: student?.id || null,
-        resolvedRollNo: student?.roll_no || null,
-        resolvedStudentName: student?.name || null,
-      });
-      if (!student) {
-        report.missingStudent += 1;
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'missing_student', reason: `No student found for roll number "${row.rollNo}"` });
-        console.log(`[CHECKED PAPER] Skipped: student not found for roll ${row.rollNo} (row ${row.rowNumber}, file ${row.checkedFile})`);
-        continue;
-      }
-
-      const file = uploadedFilesByName.get(row.checkedFile);
-      if (!file) {
-        report.missingFile += 1;
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'missing_file', reason: `No uploaded file matches Checked File "${row.checkedFile}"` });
-        console.log(`[CHECKED PAPER] Skipped: file missing - "${row.checkedFile}" (row ${row.rowNumber}, roll ${row.rollNo}, student_id=${student.id})`);
-        continue;
-      }
-
-      const recipientPhone = student.parent_whatsapp_number || student.guardian_phone || student.whatsapp_number || student.contact_phone || null;
-      console.log(`[CHECKED PAPER] Roll ${row.rollNo} → student_id=${student.id} → file=${row.checkedFile} → recipient=${recipientPhone || 'MISSING'}`);
-      if (!recipientPhone) {
-        console.log(`[CHECKED PAPER] Skipped: WhatsApp number missing for student_id=${student.id} (roll ${row.rollNo})`);
-      }
-
-      seenRollKeys.add(rollKey);
-      seenCheckedFiles.add(row.checkedFile);
-
-      const rowTestLabel = row.paperCode || file.originalname;
-      // Previously hardcoded to null, which discarded any obtained score by making it
-      // permanently invisible to the graph/RESULTS/PERFORMANCE queries (they all require
-      // max_marks to be set). Resolve the real configured max instead: the batch-level
-      // "Max Marks" field first, else whatever max marks this exact test is already
-      // configured with elsewhere (e.g. a prior OMR import for the same test label).
-      const rowMaxMarks = row.totalScore !== null
-        ? await resolveConfiguredMaxMarks(coachingId, branchId, rowTestLabel, batchMaxMarks)
-        : null;
-      if (row.totalScore !== null && !rowMaxMarks) {
-        console.warn('[BULK PAPER UPLOAD] Total Score present but no max marks configured; storing marks without max_marks (will not appear on graphs until max marks is set)', {
-          row: row.rowNumber,
-          rollNo: row.rollNo,
-          testLabel: rowTestLabel,
-        });
-      }
-
-      let uploadResult = null;
-      try {
-        uploadResult = await savePaperUpload({
-          coachingId,
-          branchId,
-          studentId: student.id,
-          file,
-          uploadedBy: req.session.user.id,
-          testLabel: rowTestLabel,
-          marksObtained: row.totalScore,
-          maxMarks: rowMaxMarks,
-          answerRequestId: null,
-          physicsMarks: row.physicsMarks,
-          chemistryMarks: row.chemistryMarks,
-          biologyMarks: row.biologyMarks,
-          correctCount: row.correctCount,
-          wrongCount: row.wrongCount,
-          blankCount: row.blankCount,
-          multiMarkedCount: row.multiMarkedCount,
-          paperCode: row.paperCode || null,
-        });
-      } catch (err) {
-        console.error('[BULK PAPER UPLOAD] Excel row save failed', { row: row.rowNumber, file: row.checkedFile, rollNo: row.rollNo, error: err.message });
-        report.failed += 1;
-        report.details.push({ row: row.rowNumber, rollNo: row.rollNo, file: row.checkedFile, status: 'failed', reason: err.message || 'Upload failed while saving file' });
-        continue;
-      }
-
-      report.imported += 1;
-      report.details.push({
-        row: row.rowNumber,
-        rollNo: row.rollNo,
-        file: row.checkedFile,
-        status: uploadResult.status === 'duplicate' ? 'duplicate_recent_upload' : 'imported',
-        reason: uploadResult.status === 'duplicate'
-          ? `Duplicate click ignored for roll number "${row.rollNo}" (already imported moments ago)`
-          : `Assigned to roll number "${row.rollNo}"`,
-      });
-
-      if (uploadResult.status !== 'duplicate') {
-        // WhatsApp notification is intentionally isolated from the upload try/catch
-        // above: a notification failure for this recipient must never be counted as
-        // an upload failure, and must never stop the remaining rows from processing.
-        try {
-          const notifyResult = await notifyPaperEvent({
-            req,
-            coaching,
-            student,
-            paperId: uploadResult.paperId,
-            type: row.totalScore !== null && rowMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
-          });
-          console.log('[BULK PAPER UPLOAD] WhatsApp notify result', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, result: notifyResult });
-          if (notifyResult?.ok) {
-            console.log('[CHECKED PAPER] Sent successfully');
-          } else {
-            console.log(`[CHECKED PAPER] Skipped: WhatsApp send failed for student_id=${student.id} (roll ${row.rollNo}) - ${notifyResult?.reason || notifyResult?.error || 'unknown reason'}`);
+    // Row-by-row routing (Roll Number + Checked File taken from the SAME Excel row) lives in
+    // services/checkedPaperImport.js so it is covered by scripts/test-checked-paper-routing.js.
+    const report = await runCheckedPaperImport({
+      excelRows,
+      students: branchStudents,
+      files,
+      onRowDone: (progress) => sendProgress({
+        type: 'progress',
+        total: excelRows.length,
+        index: progress.totalRows,
+        assigned: progress.imported,
+        failed: progress.failed + progress.missingStudent + progress.missingFile + progress.invalidFilename + progress.duplicateMapping,
+      }),
+      deps: {
+        savePaper: async ({ row, student, file }) => {
+          const rowTestLabel = row.paperCode || file.originalname;
+          // Previously hardcoded to null, which discarded any obtained score by making it
+          // permanently invisible to the graph/RESULTS/PERFORMANCE queries (they all require
+          // max_marks to be set). Resolve the real configured max instead: the batch-level
+          // "Max Marks" field first, else whatever max marks this exact test is already
+          // configured with elsewhere (e.g. a prior OMR import for the same test label).
+          const rowMaxMarks = row.totalScore !== null
+            ? await resolveConfiguredMaxMarks(coachingId, branchId, rowTestLabel, batchMaxMarks)
+            : null;
+          if (row.totalScore !== null && !rowMaxMarks) {
+            console.warn('[BULK PAPER UPLOAD] Total Score present but no max marks configured; storing marks without max_marks (will not appear on graphs until max marks is set)', {
+              row: row.rowNumber,
+              rollNo: row.rollNo,
+              testLabel: rowTestLabel,
+            });
           }
-        } catch (notifyErr) {
-          console.error('[BULK PAPER UPLOAD] WhatsApp notify threw unexpectedly', { row: row.rowNumber, rollNo: row.rollNo, studentId: student.id, error: notifyErr.message });
-          console.log(`[CHECKED PAPER] Skipped: WhatsApp send threw for student_id=${student.id} (roll ${row.rollNo}) - ${notifyErr.message}`);
-        }
-      }
-      } finally {
-        sendProgress({
-          type: 'progress',
-          total: excelRows.length,
-          index: report.totalRows,
-          assigned: report.imported,
-          failed: report.failed + report.missingStudent + report.missingFile + report.invalidFilename + report.duplicateMapping,
-        });
-      }
-    }
+          const uploadResult = await savePaperUpload({
+            coachingId,
+            branchId,
+            studentId: student.id,
+            file,
+            uploadedBy: req.session.user.id,
+            testLabel: rowTestLabel,
+            marksObtained: row.totalScore,
+            maxMarks: rowMaxMarks,
+            answerRequestId: null,
+            physicsMarks: row.physicsMarks,
+            chemistryMarks: row.chemistryMarks,
+            biologyMarks: row.biologyMarks,
+            correctCount: row.correctCount,
+            wrongCount: row.wrongCount,
+            blankCount: row.blankCount,
+            multiMarkedCount: row.multiMarkedCount,
+            paperCode: row.paperCode || null,
+          });
+          return {
+            status: uploadResult.status,
+            paperId: uploadResult.paperId,
+            notifyType: row.totalScore !== null && rowMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
+          };
+        },
+        // Checked papers go to the parent/guardian WhatsApp number only.
+        notify: ({ student, paperId, notifyType }) => notifyPaperEvent({
+          req,
+          coaching,
+          student,
+          paperId,
+          type: notifyType,
+          recipientMode: 'parent',
+        }),
+      },
+    });
 
-    const unmatchedFiles = files
-      .map((file) => file.originalname)
-      .filter((name) => !seenCheckedFiles.has(name));
+    const unmatchedFiles = report.unmatchedFiles;
     if (unmatchedFiles.length) {
       console.error('[BULK PAPER UPLOAD] uploaded files with no matching Excel row', { unmatchedFiles });
     }
 
     req.session.flash = {
-      type: report.missingStudent || report.missingFile || report.invalidFilename || report.duplicateMapping || report.failed || unmatchedFiles.length ? 'warning' : 'success',
-      text: `Bulk paper import complete. Total rows: ${report.totalRows}, Imported: ${report.imported}, Missing student: ${report.missingStudent}, Missing file: ${report.missingFile}, Invalid filename: ${report.invalidFilename}, Duplicate mapping: ${report.duplicateMapping}, Failed: ${report.failed}, Unmatched files: ${unmatchedFiles.length}`,
+      type: report.missingStudent || report.missingFile || report.invalidFilename || report.duplicateMapping || report.failed || report.whatsappFailed || unmatchedFiles.length ? 'warning' : 'success',
+      text: `Bulk paper import complete. Total rows: ${report.totalRows}, Imported: ${report.imported}, Missing student: ${report.missingStudent}, Missing file: ${report.missingFile}, Invalid filename: ${report.invalidFilename}, Duplicate mapping: ${report.duplicateMapping}, Failed: ${report.failed}, Unmatched files: ${unmatchedFiles.length}. WhatsApp accepted by API: ${report.whatsappSent}, WhatsApp failed: ${report.whatsappFailed}, WhatsApp skipped: ${report.whatsappSkipped}`,
       details: [
-        ...report.details.filter((item) => item.status !== 'imported').slice(0, 20),
+        ...report.details.filter((item) => item.status !== 'imported' || item.whatsapp?.status === 'failed').slice(0, 20),
         ...unmatchedFiles.map((name) => ({ file: name, status: 'unmatched_file', reason: 'Uploaded file was not referenced by any Excel row' })),
       ].slice(0, 30),
     };
     await auditActor(req, 'paper_uploaded_bulk_excel', {
       targetType: 'paper_batch',
-      details: { ...report, unmatchedFiles },
+      details: { ...report, sendLog: undefined, unmatchedFiles },
     });
     if (wantsProgress) {
       res.write(`${JSON.stringify({

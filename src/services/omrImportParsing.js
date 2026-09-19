@@ -88,21 +88,44 @@ function decodeXmlText(value) {
     .replace(/&apos;/g, "'");
 }
 
+// Rows and cells are matched as `<tag attrs/>` OR `<tag attrs>...</tag>`. Excel writes empty
+// styled cells as self-closing `<c r="B2" s="1"/>` (and can write empty rows the same way);
+// a plain `<c\b[\s\S]*?<\/c>` would run past the `/>` and swallow the NEXT cell, shifting
+// its value into the empty cell's column — e.g. a blank Roll Number cell would pick up the
+// Paper Code, so the wrong student's roll number would be resolved.
+//
+// Each returned row array carries `rowNumber`: the real spreadsheet row (the <row r="..">
+// attribute), so skip/failure reports point at the row the admin sees in Excel even when
+// blank rows precede it.
 function parseSheetXml(sheetXml, sharedStrings) {
   const rows = [];
-  const rowMatches = sheetXml.match(/<row\b[\s\S]*?<\/row>/g) || [];
-  for (const rowXml of rowMatches) {
+  const rowPattern = /<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g;
+  let rowMatch;
+  while ((rowMatch = rowPattern.exec(sheetXml)) !== null) {
+    const rowNumber = Number((rowMatch[1].match(/\br="(\d+)"/) || [])[1]) || null;
+    const rowBody = rowMatch[2] || '';
     const cells = [];
-    const cellMatches = rowXml.match(/<c\b[\s\S]*?<\/c>/g) || [];
-    for (const cellXml of cellMatches) {
-      const ref = (cellXml.match(/\br="([A-Z]+)\d+"/) || [])[1] || '';
+    const cellPattern = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+    let cellMatch;
+    while ((cellMatch = cellPattern.exec(rowBody)) !== null) {
+      const attrs = cellMatch[1];
+      const body = cellMatch[2] || '';
+      const ref = (attrs.match(/\br="([A-Z]+)\d+"/) || [])[1] || '';
       const columnIndex = ref.split('').reduce((sum, char) => (sum * 26) + char.charCodeAt(0) - 64, 0) - 1;
-      const type = (cellXml.match(/\bt="([^"]+)"/) || [])[1] || '';
-      const rawValue = decodeXmlText((cellXml.match(/<v[^>]*>([\s\S]*?)<\/v>/) || [])[1] || (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/) || [])[1] || '');
+      const type = (attrs.match(/\bt="([^"]+)"/) || [])[1] || '';
+      const vMatch = body.match(/<v[^>]*>([\s\S]*?)<\/v>/);
+      const inlineText = (body.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
+        .map((part) => (part.match(/<t[^>]*>([\s\S]*?)<\/t>/) || [])[1] || '')
+        .join('');
+      const rawValue = decodeXmlText(vMatch ? vMatch[1] : inlineText);
       const value = type === 's' ? (sharedStrings[Number(rawValue)] || '') : rawValue;
       cells[columnIndex >= 0 ? columnIndex : cells.length] = value;
     }
-    if (cells.some((cell) => String(cell || '').trim())) rows.push(cells.map((cell) => cell || ''));
+    if (cells.some((cell) => String(cell || '').trim())) {
+      const normalized = Array.from(cells, (cell) => cell || '');
+      normalized.rowNumber = rowNumber;
+      rows.push(normalized);
+    }
   }
   return rows;
 }
@@ -231,6 +254,10 @@ function validateBulkPaperExcelColumns(normalizedHeaders) {
 // returns '' — callers must treat that as "identity unresolved", never fall
 // back to guessing a student from the filename or any other source.
 function extractRollNumberDigits(value) {
+  // A numeric cell that Excel/pandas rendered as "75.0" is the whole number 75 — without
+  // this, the "last digit run" rule below would read the ".0" fraction and yield roll "0".
+  const wholeNumber = String(value || '').trim().match(/^(\d+)\.0*$/);
+  if (wholeNumber) return wholeNumber[1];
   const digitRuns = String(value || '').match(/\d+/g);
   if (!digitRuns || !digitRuns.length) return '';
   return digitRuns[digitRuns.length - 1];
@@ -254,7 +281,7 @@ function toBulkPaperExcelRows(fileBuffer) {
     });
     const rollNoRaw = getOmrValue(raw, ['Roll Number', 'Roll No']);
     return {
-      rowNumber: index + 2,
+      rowNumber: cells.rowNumber || index + 2,
       studentName: getOmrValue(raw, ['Student']),
       rollNoRaw,
       rollNo: extractRollNumberDigits(rollNoRaw),
@@ -288,8 +315,11 @@ function resolveStudentForRollNumber(rollNo, students) {
   const targetRoll = String(rollNo || '').trim();
   if (!targetRoll) return { student: null, matchType: 'none' };
 
-  const exact = (students || []).find((student) => String(student.roll_no || '').trim() === targetRoll);
-  if (exact) return { student: exact, matchType: 'exact' };
+  // Two students sharing one exact roll number is ambiguous — picking whichever the DB
+  // returned first would silently send one student's paper to the other's parent.
+  const exactMatches = (students || []).filter((student) => String(student.roll_no || '').trim() === targetRoll);
+  if (exactMatches.length > 1) return { student: null, matchType: 'ambiguous' };
+  if (exactMatches.length === 1) return { student: exactMatches[0], matchType: 'exact' };
 
   // Numeric zero-pad fallback: an OCR'd roll like "00075" should still match a stored
   // "75" (or vice versa) — but only when it resolves to exactly one student, so it never

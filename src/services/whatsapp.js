@@ -718,6 +718,7 @@ async function getRecentWhatsAppLogs(coachingId, branchId, limit = 25) {
 }
 
 module.exports = {
+  cleanPhoneNumber,
   ensureWhatsAppSchema,
   getWhatsAppSettings,
   saveWhatsAppSettings,
