@@ -233,6 +233,60 @@
         <% } %>
       <% } %>
 
+      <% if (activeSection === 'papers' && typeof paperUploadSummary !== 'undefined' && paperUploadSummary) { %>
+        <% const pus = paperUploadSummary; %>
+        <section class="ops2-panel paper-upload-summary" id="paper-upload-summary">
+          <div class="ops2-panel__header compact">
+            <div>
+              <p class="ops2-eyebrow">Bulk upload #<%= pus.id %></p>
+              <h3>PAPER UPLOAD COMPLETE</h3>
+            </div>
+            <a class="ops2-ghost-btn" href="/admin/dashboard?section=papers&uploadBatch=<%= pus.id %>">Refresh statuses</a>
+          </div>
+          <div class="pus-counts">
+            <span>✅ <strong><%= pus.counts.processed %></strong> papers processed</span>
+            <span>✅ <strong><%= pus.counts.sent %></strong> papers sent</span>
+            <% if (pus.counts.partial) { %><span>⚠️ <strong><%= pus.counts.partial %></strong> partly sent (some numbers failed)</span><% } %>
+            <span>⚠️ <strong><%= pus.counts.failed %></strong> papers failed</span>
+            <span>⚠️ <strong><%= pus.counts.skipped %></strong> papers skipped</span>
+            <% if (pus.counts.pending) { %><span>⏳ <strong><%= pus.counts.pending %></strong> waiting for WhatsApp</span><% } %>
+          </div>
+          <% if (pus.reasons.length) { %>
+            <p class="pus-label">Reasons:</p>
+            <ul class="pus-reasons">
+              <% pus.reasons.forEach((reason) => { %><li><strong><%= reason.count %></strong> — <%= reason.category %></li><% }) %>
+            </ul>
+          <% } %>
+          <p class="muted tiny-note">Statuses are live: delivery reports (and template retries after a 131047 rejection) arrive from WhatsApp after the upload, so use "Refresh statuses" to see the latest.</p>
+          <details class="pus-details">
+            <summary>Show every paper and recipient (<%= pus.rows.length %>)</summary>
+            <div class="ops2-table-shell">
+              <table class="ops2-table ops2-table--wide">
+                <thead><tr><th>Student</th><th>Roll No</th><th>Paper</th><th>Recipient</th><th>Status</th><th>Exact Reason</th></tr></thead>
+                <tbody>
+                  <% pus.rows.forEach((row) => { %>
+                    <tr>
+                      <td><%= row.student %></td>
+                      <td><%= row.rollNo %></td>
+                      <td><%= row.paper %></td>
+                      <td><%= row.recipient %></td>
+                      <td><span class="status <%= String(row.status).toLowerCase().replace(/\s+/g, '-') %>"><%= row.status %></span></td>
+                      <td><%= row.reason %></td>
+                    </tr>
+                  <% }) %>
+                </tbody>
+              </table>
+            </div>
+            <% if (pus.excelOnlyRows.length) { %>
+              <p class="pus-label">Excel rows without an uploaded paper (<%= pus.excelOnlyRows.length %>)</p>
+              <ul class="pus-reasons">
+                <% pus.excelOnlyRows.forEach((row) => { %><li>Row <%= row.row %> · roll <%= row.rollNo %> · <%= row.checkedFile %> — <%= row.reason %></li><% }) %>
+              </ul>
+            <% } %>
+          </details>
+        </section>
+      <% } %>
+
       <% if (subscriptionState.accessBlocked) { %>
         <section class="ops2-panel blocked-card">
           <div class="ops2-panel__header compact">
@@ -1300,7 +1354,11 @@
                         <td><%= log.name || log.roll_no || '-' %></td>
                         <td><%= log.phone_number %></td>
                         <td><%= log.message_type %></td>
-                        <td><span class="status <%= log.status %>"><%= log.status %></span><% if (log.last_error) { %><br><small class="muted"><%= log.last_error %></small><% } %></td>
+                        <% if (log.status === 'superseded') { %>
+                          <td><span class="status <%= log.superseded_status || 'sent' %>">Resent via template → <%= log.superseded_status || 'sent' %></span><% if (log.last_error) { %><br><small class="muted">First attempt: <%= log.last_error %></small><% } %></td>
+                        <% } else { %>
+                          <td><span class="status <%= log.status %>"><%= log.status %></span><% if (log.last_error) { %><br><small class="muted"><%= log.last_error %></small><% } %></td>
+                        <% } %>
                         <td><%= log.meta_message_id || '-' %></td>
                         <td><%= Number(log.retry_count || 0) %><% if (log.resent_at) { %><br><small class="muted"><%= log.resent_at %></small><% } %></td>
                         <td>
@@ -1498,6 +1556,7 @@
         const startedAt = Date.now();
         let total = 0;
         let elapsedTimer = null;
+        let redirectTo = null;
 
         resetPanel(0);
         elapsedEl.textContent = 'Elapsed: 0s';
@@ -1557,6 +1616,7 @@
                   etaEl.textContent = 'Est. remaining: --';
                 }
               } else if (event.type === 'done') {
+                redirectTo = event.redirect || null;
                 fill.style.width = '100%';
                 percentEl.textContent = '100%';
                 finalEl.hidden = false;
@@ -1571,7 +1631,11 @@
           finalEl.textContent = `Upload failed: ${error.message || 'network error'}`;
         } finally {
           stop();
-          window.setTimeout(() => window.location.reload(), 1500);
+          // The server sends the summary page of this upload; fall back to a plain reload.
+          window.setTimeout(() => {
+            if (redirectTo) window.location.assign(redirectTo);
+            else window.location.reload();
+          }, 1500);
         }
       });
     })();

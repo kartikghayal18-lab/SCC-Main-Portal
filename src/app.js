@@ -20,10 +20,13 @@ const {
   getRecentWhatsAppLogs,
   resendWhatsAppLog,
   updateWhatsAppLogStatus,
+  markLogSuperseded,
+  getFinalLogStatuses,
   logWhatsAppMessage,
   sendTextMessage,
   sendTemplateMessage,
   buildTemplateFallback,
+  buildOversizeImageFallback,
 } = require('./services/whatsapp');
 const {
   sendDueFeeReminder,
@@ -61,11 +64,13 @@ const {
 } = require('./services/parentAssistant');
 const { buildProgressSummaryFromPapers, getMarkedPapersForStudent } = require('./services/progress');
 const {
+  NO_VALID_NUMBER_REASON,
   isReEngagementError,
   selectPaperRecipients,
   deliverPaperDocument,
 } = require('./services/paperWhatsApp');
-const { runCheckedPaperImport } = require('./services/checkedPaperImport');
+const { runPaperUpload } = require('./services/checkedPaperImport');
+const { buildPaperUploadSummary } = require('./services/paperUploadSummary');
 const {
   createPerfTrace,
   getGlobalSlowOperations,
@@ -941,7 +946,7 @@ async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDat
 async function getPaperDocumentUrl(req, paperId, studentId) {
   const paper = await get(
     `SELECT tp.id, tp.original_name, tp.stored_name, tp.storage_type, tp.storage_key, tp.public_url, tp.content_type,
-            tp.marks_obtained, tp.max_marks, tp.test_label, tp.coaching_id,
+            tp.marks_obtained, tp.max_marks, tp.test_label, tp.coaching_id, tp.size_bytes,
             u.id AS student_id, u.roll_no, u.name, u.branch_id, u.whatsapp_number, u.parent_whatsapp_number,
             u.contact_phone, u.guardian_phone
      FROM test_papers tp
@@ -958,6 +963,8 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
   return {
     fileUrl: paper.public_url,
     fileName: paper.original_name || 'paper.pdf',
+    // Stored size decides IMAGE vs DOCUMENT template; null falls back to an S3 HEAD request.
+    sizeBytes: paper.size_bytes === null || paper.size_bytes === undefined ? null : Number(paper.size_bytes),
     paper,
     student: {
       id: paper.student_id,
@@ -975,7 +982,7 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
 
 // Meta accepts free-form messages with HTTP 200 and only reports 131047 (24-hour window closed)
 // later via this webhook, so the approved-template retry has to start here. One retry per log.
-async function retryFailedMessageAsTemplate(metaMessageId) {
+async function retryFailedMessageAsTemplate(metaMessageId, buildFallback = buildTemplateFallback) {
   const log = await get(
     `SELECT id, coaching_id, branch_id, student_id, phone_number, message_type, message_content,
             document_url, document_filename, retry_count
@@ -988,7 +995,7 @@ async function retryFailedMessageAsTemplate(metaMessageId) {
     return;
   }
 
-  const fallback = await buildTemplateFallback(log);
+  const fallback = await buildFallback(log);
   if (!fallback) {
     console.error('[WHATSAPP TEMPLATE RETRY] skipped: no template form', { logId: log.id, messageType: log.message_type });
     return;
@@ -1003,6 +1010,11 @@ async function retryFailedMessageAsTemplate(metaMessageId) {
     to: log.phone_number,
     ...fallback,
   });
+  if (result?.ok) {
+    // The template attempt now carries this message: its sent/delivered/read status is the
+    // final outcome, not this row's 131047 failure.
+    await markLogSuperseded(log.id, result.logId);
+  }
   const note = result?.ok
     ? `Auto-retried via approved template ${fallback.templateName}`
     : `Template retry (${fallback.templateName}) failed: ${result?.error || 'unknown error'}`;
@@ -1013,7 +1025,20 @@ async function retryFailedMessageAsTemplate(metaMessageId) {
   console.log('[WHATSAPP TEMPLATE RETRY] done', { logId: log.id, ok: Boolean(result?.ok), metaMessageId: result?.metaMessageId || null });
 }
 
-async function notifyPaperEvent({ req, coaching, student, paperId, type, recipientMode = 'all' }) {
+// Summary bar for one bulk paper upload, with each recipient's LIVE WhatsApp status.
+async function loadPaperUploadSummary(coachingId, branchId, batchId) {
+  const batch = await get(
+    `SELECT id, results_json, created_at FROM paper_upload_batches WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+    [batchId, coachingId, branchId]
+  );
+  if (!batch) return null;
+  const report = JSON.parse(batch.results_json);
+  const logIds = report.results.flatMap((paper) => (paper.recipients || []).map((recipient) => recipient.logId)).filter(Boolean);
+  const finalStatuses = logIds.length ? await getFinalLogStatuses(logIds) : new Map();
+  return { id: batch.id, createdAt: batch.created_at, ...buildPaperUploadSummary(report, finalStatuses) };
+}
+
+async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
   try {
     console.log('[WHATSAPP PAPER] upload hook start', {
       studentId: student.id,
@@ -1042,17 +1067,14 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type, recipie
     }
 
     const paperStudent = document.student || student;
-    const studentPhone = paperStudent.whatsapp_number || paperStudent.contact_phone;
-    const parentPhone = paperStudent.parent_whatsapp_number || paperStudent.guardian_phone;
-    console.log(`[WHATSAPP PAPER] student number ${studentPhone ? 'found' : 'missing'}`, {
+    // Every valid, distinct number stored for the student receives the paper.
+    const recipients = selectPaperRecipients(paperStudent);
+    console.log('[WHATSAPP PAPER] recipients', {
       studentId: paperStudent.id,
       paperId,
+      recipients: recipients.map((recipient) => recipient.key),
     });
-    console.log(`[WHATSAPP PAPER] parent number ${parentPhone ? 'found' : 'missing'}`, {
-      studentId: paperStudent.id,
-      paperId,
-    });
-    if (!studentPhone && recipientMode !== 'parent') {
+    if (!recipients.length) {
       await logWhatsAppMessage({
         coachingId: document.paper.coaching_id || student.coaching_id || null,
         branchId: paperStudent.branch_id || student.branch_id || null,
@@ -1063,22 +1085,16 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type, recipie
         status: 'failed',
         documentUrl: document.fileUrl,
         documentFilename: document.fileName,
-        lastError: 'Missing/invalid phone number: student has no WhatsApp or contact number on file',
+        lastError: NO_VALID_NUMBER_REASON,
       });
-    }
-    if (!parentPhone) {
-      await logWhatsAppMessage({
-        coachingId: document.paper.coaching_id || student.coaching_id || null,
-        branchId: paperStudent.branch_id || student.branch_id || null,
-        studentId: paperStudent.id,
-        phoneNumber: '',
-        messageType: 'document',
-        messageContent: document.fileName || 'paper.pdf',
-        status: 'failed',
-        documentUrl: document.fileUrl,
-        documentFilename: document.fileName,
-        lastError: 'Missing/invalid phone number: no parent/guardian WhatsApp number on file',
-      });
+      return {
+        ok: false,
+        skipped: true,
+        reason: NO_VALID_NUMBER_REASON,
+        fileUrl: document.fileUrl,
+        fileName: document.fileName,
+        results: [],
+      };
     }
     const subject = document.paper?.test_label || document.paper?.original_name || 'Result';
     const resultPercentage = isResult && Number(document.paper?.max_marks) > 0
@@ -1105,19 +1121,6 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type, recipie
       ];
     const compactCaption = compactWhatsAppMessage(caption);
 
-    const recipients = selectPaperRecipients(paperStudent, recipientMode);
-
-    if (!recipients.length) {
-      return {
-        ok: false,
-        skipped: true,
-        reason: recipientMode === 'parent' ? 'No parent/guardian WhatsApp number on file' : 'No WhatsApp number on file',
-        fileUrl: document.fileUrl,
-        fileName: document.fileName,
-        results: [],
-      };
-    }
-
     const coachingId = document.paper.coaching_id || student.coaching_id || req.session?.user?.coachingId || null;
     const branchId = paperStudent.branch_id || student.branch_id || getCurrentBranchId(req);
     const results = await deliverPaperDocument({
@@ -1128,6 +1131,7 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type, recipie
       coachingId,
       branchId,
       paperId,
+      coachingName: coaching?.brand_name || coaching?.name || null,
     });
 
     if (isResult) {
@@ -4777,6 +4781,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
             await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status, statusEvent.errors);
             if (statusEvent.status === 'failed' && isReEngagementError({ errorCode: statusEvent.errors?.[0]?.code, error: statusEvent.errors?.[0]?.message || statusEvent.errors?.[0]?.title })) {
               await retryFailedMessageAsTemplate(statusEvent.id);
+            } else if (statusEvent.status === 'failed' && String(statusEvent.errors?.[0]?.code) === '131053') {
+              // IMAGE-header paper template rejected for size: same file via the DOCUMENT template.
+              await retryFailedMessageAsTemplate(statusEvent.id, buildOversizeImageFallback);
             }
           } catch (error) {
             console.error('[WHATSAPP BOT ERROR]', error);
@@ -6362,6 +6369,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const whatsappLogsPromise = needsWhatsAppLogs
     ? getRecentWhatsAppLogs(coachingId, branchId, 25)
     : Promise.resolve([]);
+  const uploadBatchId = Number.parseInt(String(req.query.uploadBatch || ''), 10);
+  const paperUploadSummaryPromise = activeSection === 'papers' && uploadBatchId > 0
+    ? loadPaperUploadSummary(coachingId, branchId, uploadBatchId)
+    : Promise.resolve(null);
   const notificationLogsPromise = needsNotificationLogs
     ? getRecentNotificationLogs(coachingId, branchId, 100)
     : Promise.resolve([]);
@@ -6525,6 +6536,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     paperStats,
     latestMarkedPapers,
     omrImports,
+    paperUploadSummary,
   ] = await Promise.all([
     studentCountPromise,
     adminProfilePromise,
@@ -6544,6 +6556,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     paperStatsPromise,
     latestMarkedPapersPromise,
     omrImportsPromise,
+    paperUploadSummaryPromise,
   ]);
   const totalStudentCount = Number(studentCountRow?.total_students || 0);
   const whatsappSettings = buildWhatsAppSettingsView(rawWhatsappSettings);
@@ -6641,6 +6654,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     adminProfile,
     whatsappSettings,
     whatsappLogs,
+    paperUploadSummary,
     notificationLogs,
     subscriptionState,
     subscriptionNotice: subscriptionState.notice,
@@ -7674,12 +7688,11 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
     return res.redirect('/admin/dashboard?section=papers');
   }
 
-  // Excel-driven mode: admin attached a Checked-File summary workbook, so every
-  // uploaded paper is matched to a student by exact "Checked File" filename, never
-  // by upload order/index/timestamp. Without an Excel file, fall back unchanged to
-  // the original filename-parsing bulk path below (existing behaviour preserved).
+  // The uploaded FILENAME identifies the student (76.jpg -> roll 76) and every paper whose
+  // student exists is saved and sent. An attached results Excel is optional: it only
+  // supplies marks / progress-card data for the rolls it contains (matched by roll number).
+  let excelRows = [];
   if (excelFile) {
-    let excelRows;
     try {
       excelRows = toBulkPaperExcelRows(excelFile.buffer);
     } catch (error) {
@@ -7691,40 +7704,37 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
       req.session.flash = { type: 'error', text: `Could not parse results Excel file: ${error.message}` };
       return res.redirect('/admin/dashboard?section=papers');
     }
+  }
 
-    sendProgress({ type: 'start', total: excelRows.length });
+  sendProgress({ type: 'start', total: files.length });
 
-    // Fetched once and matched in memory (resolveStudentForRollNumber, called from
-    // services/checkedPaperImport.js) instead of a DB query per row — same pattern
-    // /admin/omr/import-results already uses, and it removes any possibility of the
-    // exact-match and numeric-fallback queries disagreeing with what gets tested.
-    const branchStudents = await all(
-      `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
-       FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
-      [coachingId, branchId]
-    );
+  // Fetched once and matched in memory (resolveStudentForRollNumber, called from
+  // services/checkedPaperImport.js) instead of a DB query per file.
+  const branchStudents = await all(
+    `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+     FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [coachingId, branchId]
+  );
 
-    // Row-by-row routing (Roll Number + Checked File taken from the SAME Excel row) lives in
-    // services/checkedPaperImport.js so it is covered by scripts/test-checked-paper-routing.js.
-    const report = await runCheckedPaperImport({
-      excelRows,
-      students: branchStudents,
-      files,
-      onRowDone: (progress) => sendProgress({
-        type: 'progress',
-        total: excelRows.length,
-        index: progress.totalRows,
-        assigned: progress.imported,
-        failed: progress.failed + progress.missingStudent + progress.missingFile + progress.invalidFilename + progress.duplicateMapping,
-      }),
-      deps: {
-        savePaper: async ({ row, student, file }) => {
+  // File -> student routing lives in services/checkedPaperImport.js so it is covered by
+  // scripts/test-checked-paper-routing.js.
+  const uploadReport = await runPaperUpload({
+    files,
+    excelRows,
+    students: branchStudents,
+    onFileDone: (progress) => sendProgress({
+      type: 'progress',
+      total: files.length,
+      index: progress.processed,
+      assigned: progress.saved,
+      failed: progress.notSaved,
+    }),
+    deps: {
+      savePaper: async ({ row, student, file }) => {
+        if (row) {
           const rowTestLabel = row.paperCode || file.originalname;
-          // Previously hardcoded to null, which discarded any obtained score by making it
-          // permanently invisible to the graph/RESULTS/PERFORMANCE queries (they all require
-          // max_marks to be set). Resolve the real configured max instead: the batch-level
-          // "Max Marks" field first, else whatever max marks this exact test is already
-          // configured with elsewhere (e.g. a prior OMR import for the same test label).
+          // Resolve the real configured max: the batch-level "Max Marks" field first, else
+          // whatever max marks this exact test is already configured with elsewhere.
           const rowMaxMarks = row.totalScore !== null
             ? await resolveConfiguredMaxMarks(coachingId, branchId, rowTestLabel, batchMaxMarks)
             : null;
@@ -7759,158 +7769,66 @@ app.post('/admin/upload-papers', requireCoachingAdmin, bulkPaperUploadFields, as
             paperId: uploadResult.paperId,
             notifyType: row.totalScore !== null && rowMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
           };
-        },
-        // Checked papers go to the parent/guardian WhatsApp number only.
-        notify: ({ student, paperId, notifyType }) => notifyPaperEvent({
-          req,
-          coaching,
-          student,
-          paperId,
-          type: notifyType,
-          recipientMode: 'parent',
-        }),
+        }
+
+        // No Excel row for this roll: marks / test label come from the filename, exactly as
+        // the filename-only bulk upload always did.
+        const paperMeta = parsePaperMetaFromFileName(file.originalname);
+        const fileTestLabel = paperMeta.testLabel || file.originalname;
+        const fileMaxMarks = paperMeta.marksObtained !== null
+          ? await resolveConfiguredMaxMarks(coachingId, branchId, fileTestLabel, paperMeta.maxMarks ?? batchMaxMarks)
+          : null;
+        const uploadResult = await savePaperUpload({
+          coachingId,
+          branchId,
+          studentId: student.id,
+          file,
+          uploadedBy: req.session.user.id,
+          testLabel: fileTestLabel,
+          marksObtained: paperMeta.marksObtained,
+          maxMarks: fileMaxMarks,
+          answerRequestId: null,
+        });
+        return {
+          status: uploadResult.status,
+          paperId: uploadResult.paperId,
+          notifyType: paperMeta.marksObtained !== null && fileMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
+        };
       },
-    });
-
-    const unmatchedFiles = report.unmatchedFiles;
-    if (unmatchedFiles.length) {
-      console.error('[BULK PAPER UPLOAD] uploaded files with no matching Excel row', { unmatchedFiles });
-    }
-
-    req.session.flash = {
-      type: report.missingStudent || report.missingFile || report.invalidFilename || report.duplicateMapping || report.failed || report.whatsappFailed || unmatchedFiles.length ? 'warning' : 'success',
-      text: `Bulk paper import complete. Total rows: ${report.totalRows}, Imported: ${report.imported}, Missing student: ${report.missingStudent}, Missing file: ${report.missingFile}, Invalid filename: ${report.invalidFilename}, Duplicate mapping: ${report.duplicateMapping}, Failed: ${report.failed}, Unmatched files: ${unmatchedFiles.length}. WhatsApp accepted by API: ${report.whatsappSent}, WhatsApp failed: ${report.whatsappFailed}, WhatsApp skipped: ${report.whatsappSkipped}`,
-      details: [
-        ...report.details.filter((item) => item.status !== 'imported' || item.whatsapp?.status === 'failed').slice(0, 20),
-        ...unmatchedFiles.map((name) => ({ file: name, status: 'unmatched_file', reason: 'Uploaded file was not referenced by any Excel row' })),
-      ].slice(0, 30),
-    };
-    await auditActor(req, 'paper_uploaded_bulk_excel', {
-      targetType: 'paper_batch',
-      details: { ...report, sendLog: undefined, unmatchedFiles },
-    });
-    if (wantsProgress) {
-      res.write(`${JSON.stringify({
-        type: 'done',
-        ok: true,
-        total: report.totalRows,
-        assigned: report.imported,
-        message: req.session.flash.text,
-      })}\n`);
-      return res.end();
-    }
-    return res.redirect('/admin/dashboard?section=papers');
-  }
-
-  sendProgress({ type: 'start', total: files.length });
-  const report = { assigned: 0, skipped: 0, failed: 0, duplicates: 0, details: [] };
-
-  let processedFiles = 0;
-  for (const file of files) {
-    // Same try/finally pattern as the Excel-driven branch above: existing
-    // classification logic below is untouched, this only guarantees exactly
-    // one progress event per file regardless of which branch it took.
-    try {
-    const paperMeta = parsePaperMetaFromFileName(file.originalname);
-    if (!String(paperMeta.rollNo || '').trim()) {
-      report.failed += 1;
-      report.details.push({ file: file.originalname, reason: 'Could not detect roll number from filename' });
-      continue;
-    }
-
-    const student = await get(
-      `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?`,
-      [coachingId, branchId, paperMeta.rollNo]
-    );
-
-    if (!student) {
-      report.skipped += 1;
-      report.details.push({ file: file.originalname, reason: `No student found for roll number "${paperMeta.rollNo}"` });
-      continue;
-    }
-
-    const fileTestLabel = paperMeta.testLabel || file.originalname;
-    // parsePaperMetaFromFileName no longer guesses a max-marks value (it used to assume
-    // 100, which was wrong for any other test size). Resolve the real one instead: the
-    // form's "Max Marks" field first, else this test's already-configured max elsewhere.
-    const fileMaxMarks = paperMeta.marksObtained !== null
-      ? await resolveConfiguredMaxMarks(coachingId, branchId, fileTestLabel, paperMeta.maxMarks ?? batchMaxMarks)
-      : null;
-
-    let uploadResult = null;
-    try {
-      uploadResult = await savePaperUpload({
-        coachingId,
-        branchId,
-        studentId: student.id,
-        file,
-        uploadedBy: req.session.user.id,
-        testLabel: fileTestLabel,
-        marksObtained: paperMeta.marksObtained,
-        maxMarks: fileMaxMarks,
-        answerRequestId: null,
-      });
-    } catch (err) {
-      console.error('[BULK PAPER UPLOAD] file save failed', { file: file.originalname, error: err.message });
-      report.failed += 1;
-      report.details.push({ file: file.originalname, reason: err.message || 'Upload failed while saving file' });
-      continue;
-    }
-
-    if (uploadResult.status === 'duplicate') {
-      report.duplicates += 1;
-      report.details.push({ file: file.originalname, reason: `Duplicate ignored for roll number "${paperMeta.rollNo}"` });
-      continue;
-    }
-
-    report.assigned += 1;
-    report.details.push({ file: file.originalname, reason: `Assigned to roll number "${paperMeta.rollNo}"` });
-
-    // WhatsApp notification is intentionally isolated from the upload try/catch above:
-    // a notification failure for this recipient must never be counted as an upload
-    // failure, and must never stop the remaining files in this batch from processing.
-    try {
-      const notifyResult = await notifyPaperEvent({
+      // Every valid, distinct number stored for the student receives the paper.
+      notify: ({ student, paperId, notifyType }) => notifyPaperEvent({
         req,
         coaching,
         student,
-        paperId: uploadResult.paperId,
-        type: paperMeta.marksObtained !== null && fileMaxMarks !== null ? 'test_result_published' : 'test_paper_upload',
-      });
-      console.log('[BULK PAPER UPLOAD] WhatsApp notify result', {
-        file: file.originalname,
-        rollNo: paperMeta.rollNo,
-        studentId: student.id,
-        result: notifyResult,
-      });
-    } catch (notifyErr) {
-      console.error('[BULK PAPER UPLOAD] WhatsApp notify threw unexpectedly', {
-        file: file.originalname,
-        rollNo: paperMeta.rollNo,
-        studentId: student.id,
-        error: notifyErr.message,
-      });
-    }
-    } finally {
-      processedFiles += 1;
-      sendProgress({ type: 'progress', total: files.length, index: processedFiles, assigned: report.assigned, failed: report.failed + report.skipped });
-    }
-  }
-
-  req.session.flash = {
-    type: report.failed ? 'error' : 'success',
-    text: `Upload complete. Assigned: ${report.assigned}, Duplicate ignored: ${report.duplicates}, Skipped: ${report.skipped}, Failed: ${report.failed}`,
-    details: report.details.slice(0, 20),
-  };
-  await auditActor(req, 'paper_uploaded_bulk', {
-    targetType: 'paper_batch',
-    details: report,
+        paperId,
+        type: notifyType,
+      }),
+    },
   });
+
+  const batch = await run(
+    `INSERT INTO paper_upload_batches (coaching_id, branch_id, created_by, results_json) VALUES (?, ?, ?, ?)`,
+    [coachingId, branchId, req.session.user.id, JSON.stringify(uploadReport)]
+  );
+  const summary = buildPaperUploadSummary(uploadReport);
+  await auditActor(req, excelFile ? 'paper_uploaded_bulk_excel' : 'paper_uploaded_bulk', {
+    targetType: 'paper_batch',
+    targetId: batch.lastID,
+    details: { files: files.length, excelRows: excelRows.length, ...summary.counts },
+  });
+  const summaryUrl = `/admin/dashboard?section=papers&uploadBatch=${batch.lastID}`;
   if (wantsProgress) {
-    res.write(`${JSON.stringify({ type: 'done', ok: true, total: files.length, assigned: report.assigned, message: req.session.flash.text })}\n`);
+    res.write(`${JSON.stringify({
+      type: 'done',
+      ok: true,
+      total: files.length,
+      assigned: summary.counts.processed - summary.counts.skipped,
+      message: `Paper upload complete: ${summary.counts.processed} processed, ${summary.counts.sent} sent, ${summary.counts.partial} partly sent, ${summary.counts.failed} failed, ${summary.counts.skipped} skipped.`,
+      redirect: summaryUrl,
+    })}\n`);
     return res.end();
   }
-  return res.redirect('/admin/dashboard?section=papers');
+  return res.redirect(summaryUrl);
 });
 
 app.get('/admin/omr/import-results', requireCoachingAdmin, (req, res) => {

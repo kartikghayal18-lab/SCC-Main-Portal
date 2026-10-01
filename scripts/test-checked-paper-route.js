@@ -1,7 +1,7 @@
 // Route-level test: drives the REAL Express handler for POST /admin/upload-papers (loaded from
-// src/app.js) with a real .xlsx summary + uploaded checked JPGs, through the real
-// runCheckedPaperImport → savePaperUpload → notifyPaperEvent → getPaperDocumentUrl →
-// deliverPaperDocument → whatsapp.js → fetch chain.
+// src/app.js) with uploaded checked JPGs (+ an optional real .xlsx summary), through the real
+// runPaperUpload → savePaperUpload → notifyPaperEvent → getPaperDocumentUrl →
+// deliverPaperDocument → whatsapp.js → fetch chain, ending in the stored upload summary.
 //
 // Faked at the edges ONLY:  database (in-memory module stub), file storage (in-memory),
 // network (global.fetch → fake Meta Graph API + fake CDN), multer/auth middleware (req.files
@@ -34,12 +34,12 @@ const DUMMY_ENV = {
   ADMIN_USERNAME: 'dummy', ADMIN_PASSWORD: 'dummy', ADMIN_FORCE_RESET: 'false', MERI_ADMIN_USERNAME: 'dummy', MERI_ADMIN_PASSWORD: 'dummy',
   RESEND_API_KEY: 'dummy', RESEND_FROM: 'dummy@example.test',
   WHATSAPP_ACCESS_TOKEN: 'TEST_ONLY_TOKEN', WHATSAPP_PHONE_NUMBER_ID: 'TEST_PHONE_NUMBER_ID',
-  WHATSAPP_BUSINESS_ACCOUNT_ID: 'TEST_WABA', WHATSAPP_VERIFY_TOKEN: 'dummy', WHATSAPP_PAPER_TEMPLATE_NAME: 'paper_result_notification',
+  WHATSAPP_BUSINESS_ACCOUNT_ID: 'TEST_WABA', WHATSAPP_VERIFY_TOKEN: 'dummy', WHATSAPP_PAPER_TEMPLATE_NAME: 'paper_result_notification', WHATSAPP_DOCUMENT_TEMPLATE_NAME: 'coaching_document',
 };
 Object.assign(process.env, DUMMY_ENV);
 
 const ROOT = path.join(__dirname, '..');
-const state = { students: [], papers: [], waLogs: [], sql: [] };
+const state = { students: [], papers: [], waLogs: [], sql: [], batches: [] };
 let nextId = 5000;
 
 // ---------- fake database (stub for src/db.js AND config/database.js) ----------
@@ -62,7 +62,7 @@ const fakeDb = {
       const paper = state.papers.find((p) => p.id === paperId && p.student_id === studentId && p.storage_type === 's3' && p.public_url);
       if (!paper) return null;
       const s = state.students.find((x) => x.id === paper.student_id);
-      return { id: paper.id, original_name: paper.original_name, stored_name: paper.stored_name, storage_type: paper.storage_type, storage_key: paper.storage_key, public_url: paper.public_url, content_type: paper.content_type, marks_obtained: paper.marks_obtained, max_marks: paper.max_marks, test_label: paper.test_label, coaching_id: paper.coaching_id, student_id: s.id, roll_no: s.roll_no, name: s.name, branch_id: paper.branch_id, whatsapp_number: s.whatsapp_number, parent_whatsapp_number: s.parent_whatsapp_number, contact_phone: s.contact_phone, guardian_phone: s.guardian_phone };
+      return { id: paper.id, original_name: paper.original_name, stored_name: paper.stored_name, storage_type: paper.storage_type, storage_key: paper.storage_key, public_url: paper.public_url, content_type: paper.content_type, marks_obtained: paper.marks_obtained, max_marks: paper.max_marks, test_label: paper.test_label, coaching_id: paper.coaching_id, size_bytes: paper.size_bytes, student_id: s.id, roll_no: s.roll_no, name: s.name, branch_id: paper.branch_id, whatsapp_number: s.whatsapp_number, parent_whatsapp_number: s.parent_whatsapp_number, contact_phone: s.contact_phone, guardian_phone: s.guardian_phone };
     }
     return null;
   },
@@ -71,8 +71,18 @@ const fakeDb = {
     state.sql.push(`run: ${n.slice(0, 90)}`);
     if (n.startsWith('INSERT INTO test_papers')) {
       const id = ++nextId;
-      state.papers.push({ id, coaching_id: params[0], branch_id: params[1], student_id: params[2], original_name: params[3], stored_name: params[4], storage_type: params[6], storage_key: params[7], public_url: params[8], content_type: params[9], marks_obtained: params[11], max_marks: params[12], test_label: params[14] });
+      state.papers.push({ id, coaching_id: params[0], branch_id: params[1], student_id: params[2], original_name: params[3], stored_name: params[4], storage_type: params[6], storage_key: params[7], public_url: params[8], content_type: params[9], size_bytes: params[10], marks_obtained: params[11], max_marks: params[12], test_label: params[14] });
       return { lastID: id, rowCount: 1 };
+    }
+    if (n.startsWith('INSERT INTO paper_upload_batches')) {
+      const id = ++nextId;
+      state.batches.push({ id, report: JSON.parse(params[3]) });
+      return { lastID: id, rowCount: 1 };
+    }
+    if (n.startsWith("UPDATE whatsapp_logs SET status = 'superseded'")) {
+      const log = state.waLogs.find((l) => l.id === params[1]);
+      if (log) { log.status = 'superseded'; log.superseded_by_log_id = params[0]; }
+      return { rowCount: 1 };
     }
     if (n.startsWith('INSERT INTO whatsapp_logs')) {
       const id = ++nextId;
@@ -116,7 +126,8 @@ require.cache[storagePath] = {
 
 // ---------- fake network ----------
 const apiCalls = [];
-let apiScript = (body, n) => ({ status: 200, json: { messaging_product: 'whatsapp', contacts: [{ input: body.to, wa_id: body.to }], messages: [{ id: `wamid.FAKE${n}` }] } });
+const defaultApi = (body, n) => ({ status: 200, json: { messaging_product: 'whatsapp', contacts: [{ input: body.to, wa_id: body.to }], messages: [{ id: `wamid.FAKE${n}` }] } });
+let apiScript = defaultApi;
 global.fetch = async (url, options = {}) => {
   if (String(url).startsWith('https://cdn.test/')) {
     const buffer = cdn.get(String(url));
@@ -156,8 +167,8 @@ const maskNum = (n) => (n ? `${String(n).slice(0, 2)}******${String(n).slice(-4)
 const jpg = (name) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from(`SYNTHETIC-CHECKED-PAPER:${name}`), Buffer.from([0xff, 0xd9])]);
 
 async function invokeRoute({ excelBuffer, uploadedNames, students, api }) {
-  state.students = students; state.papers = []; state.waLogs = []; state.sql = []; cdn.clear(); apiCalls.length = 0; captured.length = 0;
-  if (api) apiScript = api;
+  state.students = students; state.papers = []; state.waLogs = []; state.sql = []; state.batches = []; cdn.clear(); apiCalls.length = 0; captured.length = 0;
+  apiScript = api || defaultApi;
   const uploaded = uploadedNames.map((name) => ({ fieldname: 'papers', originalname: name, mimetype: 'image/jpeg', buffer: jpg(name), size: jpg(name).length }));
   const req = {
     method: 'POST', originalUrl: '/admin/upload-papers', ip: '127.0.0.1', headers: {}, protocol: 'https',
@@ -165,17 +176,26 @@ async function invokeRoute({ excelBuffer, uploadedNames, students, api }) {
     session: { user: { id: 1, role: 'admin', coachingId: 1, branchId: 1, isOwner: false }, flash: null },
     currentCoaching: { coaching_id: 1, name: 'TEST COACHING' },
     body: { maxMarks: '720' },
-    files: { papers: uploaded, resultsExcel: [{ fieldname: 'resultsExcel', originalname: 'summary.xlsx', buffer: excelBuffer, mimetype: 'application/octet-stream' }] },
+    files: { papers: uploaded, resultsExcel: excelBuffer ? [{ fieldname: 'resultsExcel', originalname: 'summary.xlsx', buffer: excelBuffer, mimetype: 'application/octet-stream' }] : [] },
   };
   let redirectedTo = null;
   const res = { redirect: (u) => { redirectedTo = u; }, setHeader() {}, write() {}, end() {}, status() { return res; }, send() {} };
   console.log = capture; console.error = capture; console.warn = capture;
   try { await routeHandler(req, res, (e) => { if (e) throw e; }); } finally { console.log = realConsole.log; console.error = realConsole.error; console.warn = realConsole.warn; }
-  return { flash: req.session.flash, redirectedTo, uploaded, logs: [...captured] };
+  const report = state.batches.length ? state.batches[state.batches.length - 1].report : null;
+  const byFile = (name) => report?.results.find((r) => r.filename === name);
+  return { flash: req.session.flash, redirectedTo, uploaded, logs: [...captured], report, byFile };
 }
 
 const student = (id, roll, extra = {}) => ({ id, roll_no: String(roll), name: `Student ${roll}`, parent_whatsapp_number: `90000${String(roll).padStart(5, '0')}`, whatsapp_number: `80000${String(roll).padStart(5, '0')}`, contact_phone: null, guardian_phone: null, ...extra });
-const graphDocCalls = () => apiCalls.filter((c) => c.body.type === 'document');
+// The paper a WhatsApp request carries: plain document link or template header link.
+const linkOf = (c) => {
+  if (c.body.type === 'document') return c.body.document.link;
+  const p = c.body.template.components.find((x) => x.type === 'header').parameters[0];
+  return (p.image || p.document).link;
+};
+const fileOfCall = (c) => state.papers.find((p) => p.public_url === linkOf(c))?.original_name;
+const graphDocCalls = () => apiCalls.filter((c) => fileOfCall(c));
 
 (async () => {
   const args = process.argv.slice(2);
@@ -218,11 +238,13 @@ const graphDocCalls = () => apiCalls.filter((c) => c.body.type === 'document');
   const docs = graphDocCalls();
   const outcome = (roll) => {
     const s = studentByRoll(roll); const file = expected[roll];
-    const call = docs.find((c) => c.body.document.filename === file);
+    const call = docs.find((c) => fileOfCall(c) === file);
     const paper = state.papers.find((p) => p.original_name === file);
-    const cdnBytes = call ? cdn.get(call.body.document.link) : null;
+    const cdnBytes = call ? cdn.get(linkOf(call)) : null;
     const intended = s ? `91${s.parent_whatsapp_number}` : null;
-    return { roll, file, s, call, paper, cdnBytes, intended };
+    const allTo = docs.filter((c) => fileOfCall(c) === file).map((c) => c.body.to).sort();
+    const expectedTo = s ? [s.whatsapp_number, s.parent_whatsapp_number].filter(Boolean).map((n) => `91${n}`).sort() : [];
+    return { roll, file, s, call, paper, cdnBytes, intended, allTo, expectedTo };
   };
 
   realConsole.log('Excel Roll | Expected Checked File | Actual Checked File (API filename) | Student (id) | Intended Recipient | Actual API Recipient | Attachment (sha256 of CDN bytes == uploaded file) | API Status | Result');
@@ -232,8 +254,8 @@ const graphDocCalls = () => apiCalls.filter((c) => c.body.type === 'document');
   for (const roll of [...focus, ...allExpectedRolls.filter((r) => !focusSet.has(r))]) {
     const o = outcome(roll);
     const attachmentOk = o.cdnBytes && sha(o.cdnBytes) === sha(jpg(o.file));
-    const ok = o.call && o.call.body.to === o.intended && o.paper && o.paper.student_id === o.s.id && attachmentOk;
-    realConsole.log([roll, o.file, o.call?.body.document.filename || 'NOT SENT', `${o.s?.name} (${o.s?.id})`, maskNum(o.intended), maskNum(o.call?.body.to), attachmentOk ? `sha256 ${sha(jpg(o.file)).slice(0, 12)}… match` : 'MISMATCH', o.call ? '200 (FAKE API)' : '-', ok ? 'PASS' : 'FAIL'].join(' | '));
+    const ok = o.call && JSON.stringify(o.allTo) === JSON.stringify(o.expectedTo) && o.paper && o.paper.student_id === o.s.id && attachmentOk;
+    realConsole.log([roll, o.file, o.call ? fileOfCall(o.call) : 'NOT SENT', `${o.s?.name} (${o.s?.id})`, maskNum(o.intended), maskNum(o.call?.body.to), attachmentOk ? `sha256 ${sha(jpg(o.file)).slice(0, 12)}… match` : 'MISMATCH', o.call ? '200 (FAKE API)' : '-', ok ? 'PASS' : 'FAIL'].join(' | '));
   }
 
   realConsole.log('\n--- Full Meta payload for the first focus roll ---');
@@ -243,53 +265,52 @@ const graphDocCalls = () => apiCalls.filter((c) => c.body.type === 'document');
   realConsole.log(JSON.stringify({ status: 200, body: { messaging_product: 'whatsapp', contacts: [{ input: first.call.body.to, wa_id: first.call.body.to }], messages: [{ id: 'wamid.FAKE1' }] } }));
   realConsole.log('--- whatsapp_logs rows written for it (status after API acceptance) ---');
   realConsole.log(JSON.stringify(state.waLogs.filter((l) => l.document_filename === first.file)));
-  realConsole.log('--- route flash message ---');
-  realConsole.log(JSON.stringify(run1.flash?.text));
+  realConsole.log('--- stored per-paper result for it (summary bar source) ---');
+  realConsole.log(JSON.stringify(run1.byFile(first.file)));
   realConsole.log('');
 
-  check('the REAL route ran and redirected back to the papers section', () => assert.strictEqual(run1.redirectedTo, '/admin/dashboard?section=papers'));
+  check('the REAL route ran, stored the upload batch and redirected to its summary', () => {
+    assert.ok(run1.report, 'no paper_upload_batches row');
+    assert.strictEqual(run1.redirectedTo, `/admin/dashboard?section=papers&uploadBatch=${state.batches[0].id}`);
+  });
   for (const roll of allExpectedRolls) {
     const o = outcome(roll);
-    check(`Roll ${roll} → ${o.file}: stored for student ${o.s?.id}, sent to that student's PARENT number, attachment bytes identical`, () => {
+    check(`Roll ${roll} → ${o.file}: stored for student ${o.s?.id}, sent to EVERY number of that student, attachment bytes identical`, () => {
       assert.ok(o.s, 'no student for roll'); assert.ok(o.paper, 'paper not stored'); assert.ok(o.call, 'no WhatsApp document request');
       assert.strictEqual(o.paper.student_id, o.s.id, 'stored under the wrong student');
-      assert.strictEqual(o.call.body.to, o.intended, 'wrong recipient');
-      assert.strictEqual(o.call.body.type, 'document');
-      assert.strictEqual(o.call.body.document.link, o.paper.public_url, 'document.link is not this row\'s stored file');
+      assert.deepStrictEqual(o.allTo, o.expectedTo, 'wrong recipients');
+      assert.strictEqual(o.call.body.type, 'template', 'template first — no free-form document');
+      assert.strictEqual(o.call.body.template.name, 'paper_result_notification', 'small image → IMAGE template');
+      assert.strictEqual(linkOf(o.call), o.paper.public_url, 'header link is not this row\'s stored file');
       assert.strictEqual(sha(o.cdnBytes), sha(jpg(o.file)), 'attachment bytes differ from the uploaded checked file');
+      assert.strictEqual(run1.byFile(o.file).finalStatus, 'sent');
     });
   }
-  check('recipient rule: parent-only — no document was sent to any student/own number', () => {
-    const studentOwn = new Set(students.map((s) => `91${s.whatsapp_number}`));
-    for (const c of docs) assert.ok(!studentOwn.has(c.body.to), `document sent to a student's own number ${maskNum(c.body.to)}`);
-  });
-  check('one document per resolvable Excel row; unreadable-roll rows sent nothing', () => {
-    assert.strictEqual(docs.length, allExpectedRolls.length);
-    const unresolved = excelRows.filter((r) => !r.rollNo).length;
-    assert.strictEqual(run1.flash.details.filter((d) => d.status === 'invalid_roll_number').length, unresolved);
-  });
-  check('every document is addressed to exactly the parent of the roll in ITS row (cross-check all pairs)', () => {
-    const rows = excelRows.filter((r) => r.rollNo && expected[r.rollNo]);
-    for (const r of rows) {
-      const call = docs.find((c) => c.body.document.filename === r.checkedFile);
-      assert.strictEqual(call.body.to, `91${studentByRoll(r.rollNo).parent_whatsapp_number}`, `row ${r.rowNumber}`);
+  check('no document went to a number that does not belong to the paper\'s own student', () => {
+    for (const c of docs) {
+      const paper = state.papers.find((p) => p.public_url === linkOf(c));
+      const owner = students.find((s) => s.id === paper.student_id);
+      assert.ok([owner.whatsapp_number, owner.parent_whatsapp_number].map((n) => `91${n}`).includes(c.body.to), `document sent to ${maskNum(c.body.to)}`);
     }
   });
-  check('API acceptance is reported as "accepted by API" and logged status is "sent" — never "delivered"', () => {
-    assert.match(run1.flash.text, /WhatsApp accepted by API: \d+/);
-    assert.ok(!/deliver/i.test(run1.flash.text));
-    for (const l of state.waLogs.filter((x) => x.type === 'document')) assert.strictEqual(l.status, 'sent');
+  check('API acceptance is logged as "sent" — never "delivered" (delivery only comes from the webhook)', () => {
+    const logs = state.waLogs.filter((x) => x.type === 'template');
+    assert.ok(logs.length >= allExpectedRolls.length);
+    for (const l of logs) assert.strictEqual(l.status, 'sent');
   });
-  check('route logged a [CHECKED PAPER SEND] record per imported row', () => {
-    assert.ok(run1.logs.filter((l) => l.startsWith('[CHECKED PAPER SEND]')).length >= allExpectedRolls.length);
+  check('template log rows keep the paper\'s document URL (needed for the 131053 webhook retry)', () => {
+    for (const l of state.waLogs.filter((x) => x.type === 'template')) assert.ok(state.papers.some((p) => p.public_url === l.document_url));
+  });
+  check('route logged a [PAPER UPLOAD SEND] record per sent paper', () => {
+    assert.ok(run1.logs.filter((l) => l.startsWith('[PAPER UPLOAD SEND]')).length >= allExpectedRolls.length);
   });
 
   // ================= EXTRA MESSAGES the real route sends besides the paper =================
-  const nonDoc = apiCalls.filter((c) => c.body.type !== 'document');
+  const nonDoc = apiCalls.filter((c) => !fileOfCall(c));
   realConsole.log(`\nNOTE: besides the ${docs.length} paper documents, the real route also issued ${nonDoc.length} other WhatsApp API request(s): ${JSON.stringify(nonDoc.map((c) => ({ type: c.body.type, to: maskNum(c.body.to) })))}`);
-  check('every extra (non-document) message goes only to that row\'s parent number', () => {
-    const parents = new Set(allExpectedRolls.map((r) => `91${studentByRoll(r).parent_whatsapp_number}`));
-    for (const c of nonDoc) assert.ok(parents.has(c.body.to), `extra message to unexpected number ${maskNum(c.body.to)}`);
+  check('every extra (non-document) message goes only to a number of a student whose paper was sent', () => {
+    const owners = new Set(allExpectedRolls.flatMap((r) => [studentByRoll(r).parent_whatsapp_number, studentByRoll(r).whatsapp_number]).map((n) => `91${n}`));
+    for (const c of nonDoc) assert.ok(owners.has(c.body.to), `extra message to unexpected number ${maskNum(c.body.to)}`);
   });
 
   // ================= FAILURE MODES through the real route (focus roll only) =================
@@ -299,44 +320,76 @@ const graphDocCalls = () => apiCalls.filter((c) => c.body.type === 'document');
     ['x', `??????${oneRoll}`, null, 1, 1, 1, 3, 1, 1, 1, 0, oneFile]]);
   const oneStudents = [student(1, oneRoll), student(2, 2)];
 
-  const rejected = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: oneStudents, api: () => ({ status: 400, json: { error: { message: '(#131030) Recipient phone number not in allowed list', code: 131030 } } }) });
-  check('Meta rejects (HTTP 400 / 131030) → flash + logs say FAILED, "accepted" count is 0', () => {
-    assert.match(rejected.flash.text, /WhatsApp accepted by API: 0, WhatsApp failed: 1/);
-    assert.strictEqual(rejected.flash.type, 'warning');
-    assert.ok(rejected.logs.some((l) => l.includes('WhatsApp FAILED') && l.includes('131030')));
+  const parentOnly = [student(1, oneRoll, { whatsapp_number: null }), student(2, 2)];
+  const rejected = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: parentOnly, api: () => ({ status: 400, json: { error: { message: '(#131030) Recipient phone number not in allowed list', code: 131030 } } }) });
+  check('Meta rejects (HTTP 400 / 131030) → paper SAVED, result FAILED with the exact Meta error', () => {
+    const r = rejected.byFile(oneFile);
+    assert.ok(r.paperId); assert.strictEqual(r.finalStatus, 'failed');
+    assert.match(r.reasons[0].detail, /131030/);
     assert.ok(state.waLogs.some((l) => l.status === 'failed' && /131030/.test(l.last_error || '')));
   });
 
-  const windowClosed = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: oneStudents, api: (b, n) => (b.type === 'document' ? { status: 400, json: { error: { message: '(#131047) Re-engagement message', code: 131047 } } } : { status: 200, json: { messages: [{ id: `wamid.T${n}` }] } }) });
-  check('24h window closed (131047) → template fallback sent to SAME parent with SAME file link', () => {
-    const doc = apiCalls.find((c) => c.body.type === 'document'); const tpl = apiCalls.find((c) => c.body.type === 'template');
-    assert.ok(doc && tpl); assert.strictEqual(tpl.body.to, doc.body.to);
-    assert.strictEqual(tpl.body.template.components[0].parameters[0].image.link, doc.body.document.link);
-    assert.match(windowClosed.flash.text, /WhatsApp accepted by API: 1/);
+  const tplMissing = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: parentOnly, api: (b, n) => (b.type === 'template' ? { status: 400, json: { error: { message: '(#132001) Template name does not exist in the translation', code: 132001 } } } : { status: 200, json: { messages: [{ id: `wamid.T${n}` }] } }) });
+  check('template rejected (132001) → plain document with SAME file to SAME number; paper SENT; template attempt superseded', () => {
+    const tpl = apiCalls.find((c) => c.body.type === 'template'); const doc = apiCalls.find((c) => c.body.type === 'document');
+    assert.ok(doc && tpl); assert.strictEqual(doc.body.to, tpl.body.to);
+    assert.strictEqual(doc.body.document.link, linkOf(tpl));
+    assert.strictEqual(tplMissing.byFile(oneFile).finalStatus, 'sent');
+    const first = state.waLogs.find((l) => l.type === 'template');
+    const retry = state.waLogs.find((l) => l.type === 'document');
+    assert.strictEqual(first.status, 'superseded');
+    assert.strictEqual(first.superseded_by_log_id, retry.id);
   });
 
   const cross = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: [student(1, 2), student(2, oneRoll)] });
-  check('roll numbers and ids deliberately swapped in the DB: the file still follows the ROLL NUMBER to that roll\'s own parent', () => {
-    const c = graphDocCalls()[0];
-    assert.strictEqual(c.body.to, `91${student(2, oneRoll).parent_whatsapp_number}`);
-    assert.notStrictEqual(c.body.to, `91${student(1, 2).parent_whatsapp_number}`);
+  check('roll numbers and ids deliberately swapped in the DB: the file still follows the ROLL NUMBER to that roll\'s own numbers', () => {
+    const to = graphDocCalls().map((c) => c.body.to).sort();
+    assert.deepStrictEqual(to, [`91${student(2, oneRoll).whatsapp_number}`, `91${student(2, oneRoll).parent_whatsapp_number}`].sort());
   });
 
-  const noParent = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: [student(1, oneRoll, { parent_whatsapp_number: null }), student(2, 2)] });
-  check('no parent number → NOTHING sent (student\'s own number not used), reported as skipped', () => {
+  const studentNumberOnly = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: [student(1, oneRoll, { parent_whatsapp_number: null }), student(2, 2)] });
+  check('no parent number → sent to the student\'s own WhatsApp number', () => {
+    assert.deepStrictEqual(graphDocCalls().map((c) => c.body.to), [`91${student(1, oneRoll).whatsapp_number}`]);
+    assert.strictEqual(studentNumberOnly.byFile(oneFile).finalStatus, 'sent');
+  });
+
+  const noNumbers = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: [student(1, oneRoll, { parent_whatsapp_number: null, whatsapp_number: null }), student(2, 2)] });
+  check('no number at all → paper SAVED, nothing sent, skipped with "No valid WhatsApp number available for this student"', () => {
     assert.strictEqual(apiCalls.length, 0);
-    assert.match(noParent.flash.text, /WhatsApp skipped: 1/);
+    assert.strictEqual(state.papers.length, 1);
+    assert.strictEqual(noNumbers.byFile(oneFile).reasons[0].detail, 'No valid WhatsApp number available for this student');
+    assert.ok(state.waLogs.some((l) => l.last_error === 'No valid WhatsApp number available for this student'));
   });
 
   const dupStudents = await invokeRoute({ excelBuffer: oneRow, uploadedNames: [oneFile], students: [student(1, oneRoll), student(9, oneRoll, { parent_whatsapp_number: '9111111111' })] });
   check('two students share the roll → ambiguous, nothing stored, nothing sent', () => {
     assert.strictEqual(apiCalls.length, 0); assert.strictEqual(state.papers.length, 0);
-    assert.match(dupStudents.flash.text, /Missing student: 1/);
+    assert.match(dupStudents.byFile(oneFile).reasons[0].detail, /more than one student/);
   });
 
-  const missingFile = await invokeRoute({ excelBuffer: oneRow, uploadedNames: ['some_other_checked.jpg'], students: oneStudents });
-  check('Checked File not uploaded → nothing sent, other uploaded file not substituted', () => {
-    assert.strictEqual(apiCalls.length, 0); assert.match(missingFile.flash.text, /Missing file: 1/);
+  // ================= NEW RULE: filename picks the student, Excel optional =================
+  const byName = await invokeRoute({
+    excelBuffer: buildXlsx([
+      ['Student', 'Roll Number', 'Paper Code', 'Physics', 'Chemistry', 'Biology', 'Total Score', 'Correct', 'Wrong', 'Blank', 'Multi-marked', 'Checked File'],
+      ['A', 75, 'PC1', 1, 1, 1, 150, 1, 1, 1, 0, '75.jpg']]),
+    uploadedNames: ['75.jpg', '80.jpg', '76.jpg'],
+    students: [student(1, 75), student(2, 80)],
+  });
+  check('75.jpg (in Excel) and 80.jpg (NOT in Excel) both saved and sent; 75 keeps its Excel marks', () => {
+    assert.strictEqual(byName.byFile('75.jpg').finalStatus, 'sent');
+    assert.strictEqual(byName.byFile('80.jpg').finalStatus, 'sent');
+    assert.strictEqual(state.papers.find((p) => p.original_name === '75.jpg').marks_obtained, 150);
+    assert.strictEqual(state.papers.find((p) => p.original_name === '80.jpg').marks_obtained, null);
+  });
+  check('76.jpg with no roll 76 in the database → not saved, not sent, "Student with roll number 76 not found in database."', () => {
+    assert.strictEqual(byName.byFile('76.jpg').reasons[0].detail, 'Student with roll number 76 not found in database.');
+    assert.ok(!state.papers.some((p) => p.original_name === '76.jpg'));
+  });
+
+  const noExcel = await invokeRoute({ excelBuffer: null, uploadedNames: ['80.jpg'], students: [student(2, 80)] });
+  check('no Excel attached → the same route saves and sends the paper', () => {
+    assert.strictEqual(noExcel.byFile('80.jpg').finalStatus, 'sent');
+    assert.strictEqual(graphDocCalls().length, 2);
   });
 
   realConsole.log(`\n${passes} passed, ${failures} failed.`);

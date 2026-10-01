@@ -103,6 +103,21 @@ async function ensureWhatsAppSchema() {
   await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS last_error TEXT`);
   await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS resent_at TIMESTAMPTZ`);
   await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS resent_by INTEGER`);
+  // Set when an approved-template retry replaced this attempt: the row's final outcome is the
+  // linked row's status, not this attempt's failure.
+  await run(`ALTER TABLE whatsapp_logs ADD COLUMN IF NOT EXISTS superseded_by_log_id INTEGER`);
+
+  // One row per bulk paper upload: the per-paper processing results shown in the summary bar.
+  await run(`
+    CREATE TABLE IF NOT EXISTS paper_upload_batches (
+      id SERIAL PRIMARY KEY,
+      coaching_id INTEGER NOT NULL,
+      branch_id INTEGER NOT NULL,
+      created_by INTEGER,
+      results_json TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 
   await run(`
     CREATE INDEX IF NOT EXISTS whatsapp_logs_coaching_created_idx
@@ -202,6 +217,45 @@ async function logWhatsAppMessage({
   return result.lastID;
 }
 
+async function markLogSuperseded(originalLogId, replacementLogId) {
+  if (!originalLogId || !replacementLogId) return;
+  await run(
+    `UPDATE whatsapp_logs SET status = 'superseded', superseded_by_log_id = ? WHERE id = ?`,
+    [replacementLogId, originalLogId]
+  );
+}
+
+// Live outcome of each log id: a superseded attempt resolves to its replacement's row.
+async function getFinalLogStatuses(logIds) {
+  const result = new Map();
+  let pending = [...new Set(logIds.filter(Boolean).map(Number))];
+  const origin = new Map(pending.map((id) => [id, id]));
+  for (let hop = 0; hop < 4 && pending.length; hop += 1) {
+    const rows = await all(
+      `SELECT id, status, last_error, superseded_by_log_id, message_type FROM whatsapp_logs WHERE id IN (${pending.map(() => '?').join(',')})`,
+      pending
+    );
+    const next = [];
+    for (const row of rows) {
+      const startId = origin.get(Number(row.id));
+      if (row.status === 'superseded' && row.superseded_by_log_id) {
+        origin.set(Number(row.superseded_by_log_id), startId);
+        next.push(Number(row.superseded_by_log_id));
+        continue;
+      }
+      result.set(startId, {
+        logId: Number(row.id),
+        status: row.status,
+        lastError: row.last_error,
+        viaTemplate: Number(row.id) !== startId,
+        messageType: row.message_type,
+      });
+    }
+    pending = next;
+  }
+  return result;
+}
+
 async function updateWhatsAppLogStatus(metaMessageId, status, errors = []) {
   if (!metaMessageId || !status) return;
   const hasErrors = Array.isArray(errors) && errors.length > 0;
@@ -221,7 +275,8 @@ async function updateWhatsAppLogStatus(metaMessageId, status, errors = []) {
     `UPDATE whatsapp_logs
      SET status = ?,
          last_error = CASE WHEN ? = '' THEN last_error ELSE ? END
-     WHERE meta_message_id = ?`,
+     WHERE meta_message_id = ?
+       AND status <> 'superseded'`,
     [normalizeStatus(status), errorSummary, truncateMessage(errorSummary), metaMessageId]
   );
 }
@@ -282,6 +337,8 @@ function describeDocument(filename) {
   return 'test paper';
 }
 
+const IMAGE_TEMPLATE_LIMIT_BYTES = 5 * 1024 * 1024;
+
 function getTemplateConfig() {
   return {
     languageCode: String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en').trim(),
@@ -322,18 +379,23 @@ async function buildTemplateFallback(log) {
   if (!documentUrl) return null;
   const filename = log.document_filename || 'document.pdf';
 
-  // Checked test papers are stored as images, so they go through the IMAGE-header paper template.
-  if (isImageFile(filename, documentUrl)) {
-    if (!paperTemplate) return null;
-    const paper = await get(
-      `SELECT test_label, original_name, marks_obtained, max_marks FROM test_papers WHERE public_url = ? LIMIT 1`,
+  // Checked test papers are stored as images, so they go through the IMAGE-header paper template
+  // unless the image is over Meta's 5 MB image limit (131053); those use the DOCUMENT template below.
+  const paper = isImageFile(filename, documentUrl)
+    ? await get(
+      `SELECT test_label, original_name, marks_obtained, max_marks, size_bytes FROM test_papers WHERE public_url = ? LIMIT 1`,
       [documentUrl]
-    );
+    )
+    : null;
+  if (isImageFile(filename, documentUrl) && !(Number(paper?.size_bytes) > IMAGE_TEMPLATE_LIMIT_BYTES)) {
+    if (!paperTemplate) return null;
     // Lazy require: paperWhatsApp requires this module.
     const { buildPaperTemplateComponents } = require('./paperWhatsApp');
     return {
       templateName: paperTemplate,
       languageCode,
+      documentUrl,
+      documentFilename: filename,
       components: buildPaperTemplateComponents({
         recipientName: student?.parent_name || 'Parent',
         student: student || {},
@@ -354,6 +416,40 @@ async function buildTemplateFallback(log) {
       documentLabel: describeDocument(filename),
       studentName,
       coachingName,
+    }),
+  };
+}
+
+// A paper sent with the IMAGE-header template that Meta rejected for size (131053) is re-sent
+// once with the DOCUMENT-header template (up to 100 MB), carrying the same stored file.
+async function buildOversizeImageFallback(log) {
+  const { languageCode, paperTemplate, documentTemplate } = getTemplateConfig();
+  if (String(log.message_type || '').toLowerCase() !== 'template') return null;
+  if (!String(log.message_content || '').startsWith(`template:${paperTemplate};`)) return null;
+  if (!log.document_url || !documentTemplate) return null;
+  const student = log.student_id
+    ? await get(`SELECT name, roll_no FROM users WHERE id = ? LIMIT 1`, [log.student_id])
+    : null;
+  const coaching = log.coaching_id
+    ? await get(`SELECT name, brand_name FROM coaching_classes WHERE id = ? LIMIT 1`, [log.coaching_id])
+    : null;
+  const paper = await get(
+    `SELECT test_label, marks_obtained, max_marks FROM test_papers WHERE public_url = ? LIMIT 1`,
+    [log.document_url]
+  );
+  // Lazy require: paperWhatsApp requires this module.
+  const { paperDocumentLabel } = require('./paperWhatsApp');
+  return {
+    templateName: documentTemplate,
+    languageCode,
+    documentUrl: log.document_url,
+    documentFilename: log.document_filename,
+    components: buildDocumentTemplateComponents({
+      documentUrl: log.document_url,
+      filename: log.document_filename || 'paper.jpg',
+      documentLabel: paperDocumentLabel(paper || {}),
+      studentName: student?.name || student?.roll_no,
+      coachingName: coaching?.brand_name || coaching?.name,
     }),
   };
 }
@@ -521,7 +617,7 @@ async function sendDocumentMessage({
       `UPDATE whatsapp_logs SET status = ?, meta_message_id = ? WHERE id = ?`,
       ['sent', metaMessageId, logId]
     );
-    return { ok: true, metaMessageId, response };
+    return { ok: true, metaMessageId, response, logId };
   } catch (error) {
     console.error('WHATSAPP DOCUMENT ERROR', {
       phone: phoneNumber,
@@ -599,6 +695,8 @@ async function sendTemplateMessage({
   languageCode = 'en',
   components = [],
   settings = null,
+  documentUrl = null,
+  documentFilename = null,
 }) {
   const phoneNumber = cleanPhoneNumber(to);
   const messageContent = `template:${templateName};language:${languageCode}`;
@@ -610,6 +708,8 @@ async function sendTemplateMessage({
     messageType: 'template',
     messageContent,
     status: 'pending',
+    documentUrl,
+    documentFilename,
   });
 
   try {
@@ -640,7 +740,7 @@ async function sendTemplateMessage({
       `UPDATE whatsapp_logs SET status = ?, meta_message_id = ? WHERE id = ?`,
       ['sent', metaMessageId, logId]
     );
-    return { ok: true, metaMessageId, response };
+    return { ok: true, metaMessageId, response, logId };
   } catch (error) {
     console.error('[WHATSAPP] Template send failed:', {
       coachingId,
@@ -828,9 +928,10 @@ async function resendWhatsAppLog({ logId, coachingId, branchId, resentBy }) {
 
 async function getRecentWhatsAppLogs(coachingId, branchId, limit = 25) {
   return all(
-    `SELECT wl.*, u.roll_no, u.name
+    `SELECT wl.*, u.roll_no, u.name, retry.status AS superseded_status
      FROM whatsapp_logs wl
      LEFT JOIN users u ON u.id = wl.student_id AND u.branch_id = wl.branch_id
+     LEFT JOIN whatsapp_logs retry ON retry.id = wl.superseded_by_log_id
      WHERE wl.coaching_id = ? AND wl.branch_id = ?
      ORDER BY wl.created_at DESC
      LIMIT ?`,
@@ -846,6 +947,8 @@ module.exports = {
   getRecentWhatsAppLogs,
   resendWhatsAppLog,
   updateWhatsAppLogStatus,
+  markLogSuperseded,
+  getFinalLogStatuses,
   logWhatsAppMessage,
   sendTextMessage,
   sendDocumentMessage,
@@ -858,4 +961,5 @@ module.exports = {
   buildDocumentTemplateComponents,
   buildTextTemplateComponents,
   buildTemplateFallback,
+  buildOversizeImageFallback,
 };

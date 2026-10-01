@@ -21,6 +21,7 @@ delete process.env.WHATSAPP_TEMPLATE_LANGUAGE;
 
 const PAPER_URL = 'https://files.example.com/papers/roll75_checked.jpg';
 const RECEIPT_URL = 'https://edusync.example.com/receipts/RCP-0042.pdf';
+const BIG_PAPER_URL = 'https://files.example.com/papers/83.jpg';
 const logs = new Map();
 const dbRuns = [];
 const dbPath = require.resolve('../src/db');
@@ -34,7 +35,11 @@ require.cache[dbPath] = {
       if (/FROM whatsapp_logs wl/.test(sql)) return logs.get(params[0]) || null;
       if (/FROM users/.test(sql)) return { name: 'Rahul Patil', roll_no: '75', parent_name: 'Suresh Patil' };
       if (/FROM coaching_classes/.test(sql)) return { name: 'Shiv Chhatrapati Classes', brand_name: null };
-      if (/FROM test_papers/.test(sql)) return params[0] === PAPER_URL ? { test_label: 'Unit Test\n1', marks_obtained: 42, max_marks: 50 } : null;
+      if (/FROM test_papers/.test(sql)) {
+        if (params[0] === PAPER_URL) return { test_label: 'Unit Test\n1', marks_obtained: 42, max_marks: 50, size_bytes: 3000000 };
+        if (params[0] === BIG_PAPER_URL) return { test_label: 'PC1', marks_obtained: 120, max_marks: 180, size_bytes: 5283822 };
+        return null;
+      }
       return null;
     },
     all: async () => [],
@@ -193,6 +198,39 @@ function baseLog(overrides) {
     const otherBranch = await wa.resendWhatsAppLog({ logId: 16, coachingId: 1, branchId: 2 });
     assert.ok(sent.denied && otherBranch.denied);
     assert.strictEqual(apiCalls.length, 0);
+  });
+
+  await check('131047 fallback for a checked paper OVER 5 MB → coaching_document (DOCUMENT header), not the image template', async () => {
+    const fallback = await wa.buildTemplateFallback(baseLog({ id: 30, message_type: 'document', document_url: BIG_PAPER_URL, document_filename: '83.jpg' }));
+    assert.strictEqual(fallback.templateName, 'coaching_document');
+    const header = fallback.components.find((c) => c.type === 'header').parameters[0];
+    assert.strictEqual(header.type, 'document');
+    assert.strictEqual(header.document.link, BIG_PAPER_URL);
+  });
+
+  await check('webhook 131053 on a paper_result_notification log → coaching_document with the SAME file, marks in the label', async () => {
+    const fallback = await wa.buildOversizeImageFallback(baseLog({
+      id: 31, message_type: 'template', message_content: 'template:paper_result_notification;language:en',
+      document_url: BIG_PAPER_URL, document_filename: '83.jpg',
+    }));
+    assert.strictEqual(fallback.templateName, 'coaching_document');
+    assert.strictEqual(fallback.documentUrl, BIG_PAPER_URL);
+    const header = fallback.components.find((c) => c.type === 'header').parameters[0];
+    assert.deepStrictEqual(header, { type: 'document', document: { link: BIG_PAPER_URL, filename: '83.jpg' } });
+    const body = fallback.components.find((c) => c.type === 'body').parameters.map((p) => p.text);
+    assert.strictEqual(body[0], 'PC1 checked test paper (Marks 120/180)');
+  });
+
+  await check('131053 retry builder ignores non-paper templates and logs without a document (no loop)', async () => {
+    assert.strictEqual(await wa.buildOversizeImageFallback(baseLog({ message_type: 'template', message_content: 'template:coaching_document;language:en', document_url: BIG_PAPER_URL })), null);
+    assert.strictEqual(await wa.buildOversizeImageFallback(baseLog({ message_type: 'template', message_content: 'template:paper_result_notification;language:en', document_url: null })), null);
+    assert.strictEqual(await wa.buildOversizeImageFallback(baseLog({ message_type: 'document', message_content: 'x', document_url: BIG_PAPER_URL })), null);
+  });
+
+  await check('a superseded log is never overwritten by a late webhook status', async () => {
+    reset();
+    await wa.updateWhatsAppLogStatus('wamid.OLD', 'failed', [{ code: 131047, title: 'Re-engagement message' }]);
+    assert.match(lastRun(/UPDATE whatsapp_logs/).sql, /status <> 'superseded'/);
   });
 
   console.log(`\n${passes} passed, ${failures} failed.`);

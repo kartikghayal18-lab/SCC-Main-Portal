@@ -2886,3 +2886,10 @@ body.ops-dashboard-v2 {
     grid-template-columns: 1fr;
   }
 }
+
+/* Bulk paper upload summary bar */
+.paper-upload-summary { border-left: 4px solid #2f855a; }
+.paper-upload-summary .pus-counts { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 8px 0 4px; font-size: 1rem; }
+.paper-upload-summary .pus-label { margin: 12px 0 4px; font-weight: 600; }
+.paper-upload-summary .pus-reasons { margin: 0 0 8px; padding-left: 20px; }
+.paper-upload-summary .pus-details summary { cursor: pointer; font-weight: 600; margin: 8px 0; }
