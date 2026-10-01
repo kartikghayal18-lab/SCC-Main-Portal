@@ -22,6 +22,8 @@ const {
   updateWhatsAppLogStatus,
   logWhatsAppMessage,
   sendTextMessage,
+  sendTemplateMessage,
+  buildTemplateFallback,
 } = require('./services/whatsapp');
 const {
   sendDueFeeReminder,
@@ -61,7 +63,6 @@ const { buildProgressSummaryFromPapers, getMarkedPapersForStudent } = require('.
 const {
   isReEngagementError,
   selectPaperRecipients,
-  sendPaperTemplateFallback,
   deliverPaperDocument,
 } = require('./services/paperWhatsApp');
 const { runCheckedPaperImport } = require('./services/checkedPaperImport');
@@ -969,49 +970,44 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
 }
 
 
-async function retryFailedPaperDocumentAsTemplate(metaMessageId) {
+// Meta accepts free-form messages with HTTP 200 and only reports 131047 (24-hour window closed)
+// later via this webhook, so the approved-template retry has to start here. One retry per log.
+async function retryFailedMessageAsTemplate(metaMessageId) {
   const log = await get(
-    `SELECT id, coaching_id, branch_id, student_id, phone_number, message_type, document_url, document_filename, retry_count
+    `SELECT id, coaching_id, branch_id, student_id, phone_number, message_type, message_content,
+            document_url, document_filename, retry_count
      FROM whatsapp_logs
      WHERE meta_message_id = ?
      LIMIT 1`,
     [metaMessageId]
   );
-  if (!log || log.message_type !== 'document' || !log.document_url || Number(log.retry_count) > 0) {
+  if (!log || Number(log.retry_count) > 0) {
     return;
   }
 
-  const student = await get(
-    `SELECT id, name, roll_no, parent_name, branch_id FROM users WHERE id = ?`,
-    [log.student_id]
-  );
-  const paper = await get(
-    `SELECT id, test_label, original_name, marks_obtained, max_marks
-     FROM test_papers
-     WHERE public_url = ?
-     LIMIT 1`,
-    [log.document_url]
-  );
-  if (!student || !paper) {
-    console.error('[PAPER WHATSAPP TEMPLATE RETRY] skipped: missing student or paper', {
-      metaMessageId,
-      studentId: log.student_id,
-      hasStudent: Boolean(student),
-      hasPaper: Boolean(paper),
-    });
+  const fallback = await buildTemplateFallback(log);
+  if (!fallback) {
+    console.error('[WHATSAPP TEMPLATE RETRY] skipped: no template form', { logId: log.id, messageType: log.message_type });
     return;
   }
 
   await run(`UPDATE whatsapp_logs SET retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?`, [log.id]);
-
-  await sendPaperTemplateFallback({
+  console.log('[WHATSAPP TEMPLATE RETRY] start', { logId: log.id, template: fallback.templateName });
+  const result = await sendTemplateMessage({
     coachingId: log.coaching_id,
-    branchId: log.branch_id || student.branch_id,
-    student,
-    recipient: { key: 'async-retry', phone: log.phone_number },
-    document: { paper, fileUrl: log.document_url, fileName: log.document_filename },
-    paperId: paper.id,
+    branchId: log.branch_id,
+    studentId: log.student_id,
+    to: log.phone_number,
+    ...fallback,
   });
+  const note = result?.ok
+    ? `Auto-retried via approved template ${fallback.templateName}`
+    : `Template retry (${fallback.templateName}) failed: ${result?.error || 'unknown error'}`;
+  await run(
+    `UPDATE whatsapp_logs SET last_error = LEFT(COALESCE(last_error, '') || ' | ' || ?, 4000) WHERE id = ?`,
+    [note, log.id]
+  );
+  console.log('[WHATSAPP TEMPLATE RETRY] done', { logId: log.id, ok: Boolean(result?.ok), metaMessageId: result?.metaMessageId || null });
 }
 
 async function notifyPaperEvent({ req, coaching, student, paperId, type, recipientMode = 'all' }) {
@@ -4745,7 +4741,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
           try {
             await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status, statusEvent.errors);
             if (statusEvent.status === 'failed' && isReEngagementError({ errorCode: statusEvent.errors?.[0]?.code, error: statusEvent.errors?.[0]?.message || statusEvent.errors?.[0]?.title })) {
-              await retryFailedPaperDocumentAsTemplate(statusEvent.id);
+              await retryFailedMessageAsTemplate(statusEvent.id);
             }
           } catch (error) {
             console.error('[WHATSAPP BOT ERROR]', error);

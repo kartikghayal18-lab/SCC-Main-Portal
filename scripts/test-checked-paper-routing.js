@@ -482,8 +482,9 @@ const detail = (report, rowNumber) => report.details.find((d) => d.row === rowNu
     assert.strictEqual(template.to, '919000000075');
     assert.strictEqual(template.template.name, 'paper_result_notification');
     const header = template.template.components.find((c) => c.type === 'header');
-    assert.strictEqual(header.parameters[0].document.filename, 'file_0002_checked.jpg');
-    assert.strictEqual(header.parameters[0].document.link, tplOk.calls[0].body.document.link);
+    // Checked papers are JPEGs, so the paper template carries them in an IMAGE header.
+    assert.strictEqual(header.parameters[0].type, 'image');
+    assert.strictEqual(header.parameters[0].image.link, tplOk.calls[0].body.document.link);
     assert.strictEqual(tplOk.report.whatsappSent, 1);
     assert.strictEqual(tplOk.report.sendLog[0].recipients[0].channel, 'template');
   });

@@ -311,7 +311,7 @@ const graphDocCalls = () => apiCalls.filter((c) => c.body.type === 'document');
   check('24h window closed (131047) → template fallback sent to SAME parent with SAME file link', () => {
     const doc = apiCalls.find((c) => c.body.type === 'document'); const tpl = apiCalls.find((c) => c.body.type === 'template');
     assert.ok(doc && tpl); assert.strictEqual(tpl.body.to, doc.body.to);
-    assert.strictEqual(tpl.body.template.components[0].parameters[0].document.link, doc.body.document.link);
+    assert.strictEqual(tpl.body.template.components[0].parameters[0].image.link, doc.body.document.link);
     assert.match(windowClosed.flash.text, /WhatsApp accepted by API: 1/);
   });
 

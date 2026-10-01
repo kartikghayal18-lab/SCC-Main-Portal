@@ -39,30 +39,35 @@ function selectPaperRecipients(paperStudent, recipientMode = 'all') {
   ));
 }
 
-function buildPaperTemplateComponents({ recipientName, student, paper, paperUrl, fileName }) {
+// Approved UTILITY template (WHATSAPP_PAPER_TEMPLATE_NAME, default paper_result_notification), IMAGE header:
+// "Dear {{1}}, the checked answer sheet of {{2}} for the test {{3}} is attached with this message.
+//  Marks obtained: {{4}} out of {{5}}. Please review it with your child. Thank you."
+function buildPaperTemplateComponents({ recipientName, student, paper, paperUrl }) {
+  const text = whatsappApi.templateText;
   return [
     {
       type: 'header',
-      parameters: [
-        { type: 'document', document: { link: paperUrl, filename: fileName || paper.original_name || 'paper.pdf' } },
-      ],
+      parameters: [{ type: 'image', image: { link: paperUrl } }],
     },
     {
       type: 'body',
       parameters: [
-        { type: 'text', text: recipientName || student.name || student.roll_no || 'Parent' },
-        { type: 'text', text: student.name || student.roll_no || 'Student' },
-        { type: 'text', text: paper.test_label || paper.original_name || 'Test Paper' },
-        { type: 'text', text: String(paper.marks_obtained ?? '-') },
-        { type: 'text', text: String(paper.max_marks ?? '-') },
+        { type: 'text', text: text(recipientName || student.name || student.roll_no, 'Parent') },
+        { type: 'text', text: text(student.name || student.roll_no, 'Student') },
+        { type: 'text', text: text(paper.test_label || paper.original_name, 'Test Paper') },
+        { type: 'text', text: text(paper.marks_obtained) },
+        { type: 'text', text: text(paper.max_marks) },
       ],
     },
   ];
 }
 
 async function sendPaperTemplateFallback({ coachingId, branchId, student, recipient, document, paperId, api = whatsappApi }) {
-  const templateName = String(process.env.WHATSAPP_PAPER_TEMPLATE_NAME || 'paper_result_notification').trim();
-  const languageCode = String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en').trim();
+  const config = whatsappApi.getTemplateConfig();
+  // The paper template has an IMAGE header; a paper stored as PDF goes through the document template.
+  const isImage = whatsappApi.isImageFile(document.fileName, document.fileUrl);
+  const templateName = isImage ? config.paperTemplate : config.documentTemplate;
+  const languageCode = config.languageCode;
   if (!templateName) {
     console.error('[WHATSAPP TEMPLATE REQUIRED]', { paperId, studentId: student.id, recipient: recipient.key, reason: 'missing template name' });
     return { ok: false, failed: true, error: 'WhatsApp paper template name is missing' };
@@ -83,13 +88,19 @@ async function sendPaperTemplateFallback({ coachingId, branchId, student, recipi
     to: recipient.phone,
     templateName,
     languageCode,
-    components: buildPaperTemplateComponents({
-      recipientName: recipient.key === 'parent' ? student.parent_name || student.name || 'Parent' : student.name,
-      student,
-      paper: document.paper,
-      paperUrl: document.fileUrl,
-      fileName: document.fileName,
-    }),
+    components: isImage
+      ? buildPaperTemplateComponents({
+        recipientName: recipient.key === 'parent' ? student.parent_name || student.name || 'Parent' : student.name,
+        student,
+        paper: document.paper,
+        paperUrl: document.fileUrl,
+      })
+      : whatsappApi.buildDocumentTemplateComponents({
+        documentUrl: document.fileUrl,
+        filename: document.fileName || document.paper?.original_name || 'paper.pdf',
+        documentLabel: document.paper?.test_label || 'test paper',
+        studentName: student.name || student.roll_no,
+      }),
   });
 
   if (result?.failed || result?.ok === false) {

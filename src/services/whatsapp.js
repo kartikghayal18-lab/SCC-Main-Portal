@@ -205,23 +205,157 @@ async function logWhatsAppMessage({
 async function updateWhatsAppLogStatus(metaMessageId, status, errors = []) {
   if (!metaMessageId || !status) return;
   const hasErrors = Array.isArray(errors) && errors.length > 0;
+  // Keep the Meta error code + details in last_error only. Appending it to message_content
+  // made Resend deliver "Delivery error: ..." text to parents.
   const errorSummary = hasErrors
-    ? errors.map((error) => (
-      error?.message || error?.title || error?.code || JSON.stringify(error)
-    )).join('; ')
+    ? errors.map((error) => {
+      const title = error?.title || error?.message || JSON.stringify(error);
+      const details = error?.error_data?.details;
+      return [error?.code, title].filter(Boolean).join(' ') + (details && details !== title ? ` - ${details}` : '');
+    }).join('; ')
     : '';
-  const errorText = hasErrors ? `\n\nDelivery error: ${errorSummary}` : '';
+  if (hasErrors) {
+    console.error('[WHATSAPP DELIVERY FAILED]', { metaMessageId, status, errors: errorSummary });
+  }
   await run(
     `UPDATE whatsapp_logs
      SET status = ?,
-         message_content = CASE
-           WHEN ? = '' THEN message_content
-           ELSE LEFT(COALESCE(message_content, '') || ?, 4000)
-         END,
          last_error = CASE WHEN ? = '' THEN last_error ELSE ? END
      WHERE meta_message_id = ?`,
-    [normalizeStatus(status), errorText, errorText, errorSummary, truncateMessage(errorSummary), metaMessageId]
+    [normalizeStatus(status), errorSummary, truncateMessage(errorSummary), metaMessageId]
   );
+}
+
+// Meta rejects template text parameters containing newlines, tabs or 4+ consecutive spaces (132018).
+function templateText(value, fallback = '-') {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return (text || fallback).slice(0, 1000);
+}
+
+function stripLoggedErrors(content) {
+  return String(content || '')
+    .replace(/\n\n(Delivery error|Error):[\s\S]*$/, '')
+    .trim();
+}
+
+// Approved UTILITY template (WHATSAPP_DOCUMENT_TEMPLATE_NAME, default coaching_document), PDF header:
+// "Dear Parent, please find attached the {{1}} for {{2}} from {{3}}. Please keep this document for your records. Thank you."
+function buildDocumentTemplateComponents({ documentUrl, filename, documentLabel, studentName, coachingName }) {
+  return [
+    {
+      type: 'header',
+      parameters: [{ type: 'document', document: { link: documentUrl, filename: filename || 'document.pdf' } }],
+    },
+    {
+      type: 'body',
+      parameters: [
+        { type: 'text', text: templateText(documentLabel, 'document') },
+        { type: 'text', text: templateText(studentName, 'your child') },
+        { type: 'text', text: templateText(coachingName, 'Coaching Institute') },
+      ],
+    },
+  ];
+}
+
+// Approved UTILITY template (WHATSAPP_TEXT_TEMPLATE_NAME, default coaching_update), no header:
+// "Dear Parent, you have a new update from {{1}} regarding {{2}}. Details: {{3}}. Please reply to this message if you have any questions."
+function buildTextTemplateComponents({ coachingName, studentName, details }) {
+  return [{
+    type: 'body',
+    parameters: [
+      { type: 'text', text: templateText(coachingName, 'Coaching Institute') },
+      { type: 'text', text: templateText(studentName, 'your child') },
+      { type: 'text', text: templateText(details, 'Please contact the institute').slice(0, 700) },
+    ],
+  }];
+}
+
+function isImageFile(...values) {
+  return values.some((value) => /\.(jpe?g|png|webp)(\?|#|$)/i.test(String(value || '')));
+}
+
+function describeDocument(filename) {
+  const name = String(filename || '').toLowerCase();
+  if (name.startsWith('rcp-') || name.includes('receipt')) return 'fee receipt';
+  if (name.includes('performance')) return 'performance report';
+  if (name.includes('monthly-report')) return 'monthly report';
+  return 'test paper';
+}
+
+function getTemplateConfig() {
+  return {
+    languageCode: String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en').trim(),
+    paperTemplate: String(process.env.WHATSAPP_PAPER_TEMPLATE_NAME || 'paper_result_notification').trim(),
+    documentTemplate: String(process.env.WHATSAPP_DOCUMENT_TEMPLATE_NAME || 'coaching_document').trim(),
+    textTemplate: String(process.env.WHATSAPP_TEXT_TEMPLATE_NAME || 'coaching_update').trim(),
+  };
+}
+
+// Builds the approved-template equivalent of a whatsapp_logs row whose free-form message Meta
+// rejected with 131047 (24-hour window closed). Returns null when the row has no template form
+// (e.g. it already was a template), so callers never loop.
+async function buildTemplateFallback(log) {
+  const { languageCode, paperTemplate, documentTemplate, textTemplate } = getTemplateConfig();
+  const messageType = String(log.message_type || '').toLowerCase();
+  if (messageType !== 'text' && messageType !== 'document') return null;
+
+  const content = stripLoggedErrors(log.message_content);
+  const student = log.student_id
+    ? await get(`SELECT name, roll_no, parent_name FROM users WHERE id = ? LIMIT 1`, [log.student_id])
+    : null;
+  const coaching = log.coaching_id
+    ? await get(`SELECT name, brand_name FROM coaching_classes WHERE id = ? LIMIT 1`, [log.coaching_id])
+    : null;
+  const studentName = student?.name || student?.roll_no;
+  const coachingName = coaching?.brand_name || coaching?.name;
+
+  if (messageType === 'text') {
+    if (!textTemplate) return null;
+    return {
+      templateName: textTemplate,
+      languageCode,
+      components: buildTextTemplateComponents({ coachingName, studentName, details: content }),
+    };
+  }
+
+  const documentUrl = log.document_url || extractFirstUrl(content);
+  if (!documentUrl) return null;
+  const filename = log.document_filename || 'document.pdf';
+
+  // Checked test papers are stored as images, so they go through the IMAGE-header paper template.
+  if (isImageFile(filename, documentUrl)) {
+    if (!paperTemplate) return null;
+    const paper = await get(
+      `SELECT test_label, original_name, marks_obtained, max_marks FROM test_papers WHERE public_url = ? LIMIT 1`,
+      [documentUrl]
+    );
+    // Lazy require: paperWhatsApp requires this module.
+    const { buildPaperTemplateComponents } = require('./paperWhatsApp');
+    return {
+      templateName: paperTemplate,
+      languageCode,
+      components: buildPaperTemplateComponents({
+        recipientName: student?.parent_name || 'Parent',
+        student: student || {},
+        paper: paper || { test_label: describeDocument(filename) },
+        paperUrl: documentUrl,
+        fileName: filename,
+      }),
+    };
+  }
+
+  if (!documentTemplate) return null;
+  return {
+    templateName: documentTemplate,
+    languageCode,
+    components: buildDocumentTemplateComponents({
+      documentUrl,
+      filename,
+      documentLabel: describeDocument(filename),
+      studentName,
+      coachingName,
+    }),
+  };
 }
 
 async function sendMetaMessage({ settings, payload }) {
@@ -574,20 +708,6 @@ function isMetaReEngagementError(resultOrError) {
   return code === '131047' || message.includes('131047') || message.includes('re-engagement');
 }
 
-function buildManualResendTemplateComponents({ log, studentName, documentUrl }) {
-  return [{
-    type: 'body',
-    parameters: [
-      { type: 'text', text: studentName || 'Parent' },
-      { type: 'text', text: studentName || 'Student' },
-      { type: 'text', text: 'WhatsApp update' },
-      { type: 'text', text: '-' },
-      { type: 'text', text: '-' },
-      { type: 'text', text: documentUrl || extractFirstUrl(log.message_content) || '-' },
-    ],
-  }];
-}
-
 async function markManualResendSuccess(logId, metaMessageId, resentBy) {
   await run(
     `UPDATE whatsapp_logs
@@ -624,72 +744,73 @@ async function resendWhatsAppLog({ logId, coachingId, branchId, resentBy }) {
   const settings = await getWhatsAppSettings(coachingId, branchId);
   const phoneNumber = cleanPhoneNumber(log.phone_number);
   const messageType = String(log.message_type || 'text').toLowerCase();
-  const messageContent = String(log.message_content || '').replace(/\n\nError:.*$/s, '').trim();
+  const messageContent = stripLoggedErrors(log.message_content);
   const documentUrl = log.document_url || extractFirstUrl(messageContent);
   const documentFilename = log.document_filename || 'result.pdf';
+  // Meta reports 131047 asynchronously (HTTP 200 + wamid, then a 'failed' webhook), so a
+  // free-form retry of a 131047 failure is accepted and then fails again. Go straight to
+  // the approved template in that case.
+  const windowClosed = isMetaReEngagementError({ message: log.last_error });
 
-  console.log(`[WHATSAPP MANUAL RESEND START] logId=${logId} branchId=${branchId} coachingId=${coachingId}`);
+  console.log(`[WHATSAPP MANUAL RESEND START] logId=${logId} branchId=${branchId} coachingId=${coachingId} type=${messageType} windowClosed=${windowClosed}`);
 
-  let normalResult = null;
-  try {
-    if (messageType === 'document') {
-      if (!documentUrl) throw new Error('Original document URL is missing from this failed log.');
-      normalResult = await sendMetaMessage({
-        settings,
-        payload: {
-          to: phoneNumber,
-          type: 'document',
-          document: { link: documentUrl, filename: documentFilename, caption: messageContent || 'Document attached.' },
-        },
-      });
-    } else {
-      normalResult = await sendMetaMessage({
-        settings,
-        payload: {
-          to: phoneNumber,
-          type: 'text',
-          text: { preview_url: false, body: messageContent || 'Message from coaching portal.' },
-        },
-      });
-    }
-    const metaMessageId = normalResult?.messages?.[0]?.id || null;
-    await markManualResendSuccess(logId, metaMessageId, resentBy);
-    console.log(`[WHATSAPP MANUAL RESEND NORMAL SENT] logId=${logId}`);
-    return { ok: true, metaMessageId };
-  } catch (error) {
-    if (!isMetaReEngagementError(error)) {
-      const safeError = getSafeErrorMessage(error);
-      await markManualResendFailure(logId, safeError);
-      console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=${getMetaErrorCode(error) || ''}`);
-      return { ok: false, failed: true, message: `Resend failed: ${safeError}` };
+  if (!windowClosed) {
+    try {
+      let normalResult = null;
+      if (messageType === 'document') {
+        if (!documentUrl) throw new Error('Original document URL is missing from this failed log.');
+        normalResult = await sendMetaMessage({
+          settings,
+          payload: {
+            to: phoneNumber,
+            type: 'document',
+            document: { link: documentUrl, filename: documentFilename, caption: messageContent || 'Document attached.' },
+          },
+        });
+      } else {
+        normalResult = await sendMetaMessage({
+          settings,
+          payload: {
+            to: phoneNumber,
+            type: 'text',
+            text: { preview_url: false, body: messageContent || 'Message from coaching portal.' },
+          },
+        });
+      }
+      const metaMessageId = normalResult?.messages?.[0]?.id || null;
+      await markManualResendSuccess(logId, metaMessageId, resentBy);
+      console.log(`[WHATSAPP MANUAL RESEND NORMAL SENT] logId=${logId}`);
+      return { ok: true, metaMessageId };
+    } catch (error) {
+      if (!isMetaReEngagementError(error)) {
+        const safeError = getSafeErrorMessage(error);
+        await markManualResendFailure(logId, safeError);
+        console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=${getMetaErrorCode(error) || ''}`);
+        return { ok: false, failed: true, message: `Resend failed: ${safeError}` };
+      }
     }
   }
 
   console.warn(`[WHATSAPP MANUAL RESEND 131047] logId=${logId}`);
-  const templateName = String(process.env.WHATSAPP_PAPER_TEMPLATE_NAME || 'paper_result_notification').trim();
-  const languageCode = String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en').trim();
-  if (!templateName) {
-    const message = 'Resend failed: approved WhatsApp template is required outside the 24-hour window.';
+  const fallback = await buildTemplateFallback(log);
+  if (!fallback) {
+    const message = 'Resend failed (131047): parent has not messaged in 24 hours and this message has no approved template form.';
     await markManualResendFailure(logId, message);
     console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=131047`);
     return { ok: false, failed: true, message };
   }
 
   try {
-    console.log(`[WHATSAPP MANUAL RESEND TEMPLATE START] logId=${logId}`);
+    console.log(`[WHATSAPP MANUAL RESEND TEMPLATE START] logId=${logId} template=${fallback.templateName}`);
     const templateResult = await sendMetaMessage({
       settings,
       payload: {
         to: phoneNumber,
         type: 'template',
         template: {
-          name: templateName,
-          language: { code: languageCode },
-          components: buildManualResendTemplateComponents({
-            log,
-            studentName: log.student_name || log.roll_no || 'Student',
-            documentUrl,
-          }),
+          name: fallback.templateName,
+          language: { code: fallback.languageCode },
+          components: fallback.components,
         },
       },
     });
@@ -698,10 +819,10 @@ async function resendWhatsAppLog({ logId, coachingId, branchId, resentBy }) {
     console.log(`[WHATSAPP MANUAL RESEND TEMPLATE SENT] logId=${logId}`);
     return { ok: true, metaMessageId, template: true };
   } catch (error) {
-    const message = 'Resend failed: approved WhatsApp template is required outside the 24-hour window.';
-    await markManualResendFailure(logId, `${message} ${getSafeErrorMessage(error)}`);
+    const safeError = getSafeErrorMessage(error);
+    await markManualResendFailure(logId, `Template resend failed: ${safeError}`);
     console.error(`[WHATSAPP MANUAL RESEND FAILED] logId=${logId} code=${getMetaErrorCode(error) || 'template'}`);
-    return { ok: false, failed: true, message };
+    return { ok: false, failed: true, message: `Resend failed: ${safeError}` };
   }
 }
 
@@ -731,4 +852,10 @@ module.exports = {
   sendImageMessage,
   sendTemplateMessage,
   sendBulkMessages,
+  templateText,
+  isImageFile,
+  getTemplateConfig,
+  buildDocumentTemplateComponents,
+  buildTextTemplateComponents,
+  buildTemplateFallback,
 };
