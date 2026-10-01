@@ -367,6 +367,19 @@ if (isProduction) {
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, '..', 'views'));
 
+app.use((req, res, next) => {
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+// Static files are served before the session middleware: otherwise every CSS/JS/image request
+// read (and, for visitors, created) a session row in the database.
+app.use('/public', express.static(path.join(__dirname, '..', 'public'), { maxAge: '1h' }));
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+app.use('/paper-files', express.static(getLocalPaperDir()));
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(
@@ -423,13 +436,6 @@ app.use((req, res, next) => {
   return runWithPerfTrace(trace, next);
 });
 app.use((req, res, next) => {
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  next();
-});
-app.use((req, res, next) => {
   if (req.session && !req.session.csrfToken) {
     req.session.csrfToken = crypto.randomBytes(24).toString('hex');
   }
@@ -444,9 +450,6 @@ app.use((req, res, next) => {
   };
   next();
 });
-app.use('/public', express.static(path.join(__dirname, '..', 'public')));
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
-app.use('/paper-files', express.static(getLocalPaperDir()));
 
 app.get('/receipts/:feeId/:token/:fileName', async (req, res) => {
   try {
@@ -3771,23 +3774,45 @@ function getPapersRedirectPath(sessionUser) {
   return sessionUser?.role === 'admin' ? '/admin/dashboard?section=papers' : '/student/dashboard';
 }
 
+// The database is a network round trip away, and these per-request access checks (coaching,
+// branch, legal acceptance, password setup) ran ~4 queries before every page. Cache them briefly
+// per process; any write request (POST/PUT/PATCH/DELETE, from any user) clears the cache so
+// settings changes, password setup and legal acceptance take effect on the very next page.
+const REQUEST_CONTEXT_TTL_MS = 60 * 1000;
+const requestContextCache = new Map();
+
+// `canCache(value)` must be true only for values that let the request through, so a state
+// that redirects (e.g. legal not accepted yet) is re-checked on every request.
+async function cachedRequestContext(req, key, load, canCache = Boolean) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    requestContextCache.clear();
+    return load();
+  }
+  const hit = requestContextCache.get(key);
+  if (hit && Date.now() - hit.at < REQUEST_CONTEXT_TTL_MS) return hit.value;
+  const value = await load();
+  if (canCache(value)) requestContextCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
 app.use(async (req, res, next) => {
   if (!req.session?.user || req.session.user.isOwner) return next();
 
-  const coaching = await getCoachingContextById(req.session.user.coachingId);
+  const { id: userId, coachingId, branchId } = req.session.user;
+  const coaching = await cachedRequestContext(req, `coaching:${coachingId}`, () => getCoachingContextById(coachingId));
   if (!coaching) {
     req.session.destroy(() => res.redirect('/login'));
     return;
   }
 
-  const branch = await get(
+  const branch = await cachedRequestContext(req, `branch:${userId}:${coachingId}:${branchId}`, () => get(
     `SELECT b.id, b.code, b.name
      FROM users u
      JOIN branches b ON b.id = u.branch_id
      WHERE u.id = ? AND u.coaching_id = ? AND u.branch_id = ? AND b.is_active = TRUE
      LIMIT 1`,
-    [req.session.user.id, req.session.user.coachingId, req.session.user.branchId]
-  );
+    [userId, coachingId, branchId]
+  ));
   if (!branch) {
     req.session.destroy(() => res.redirect('/login'));
     return;
@@ -3848,7 +3873,12 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  const acceptance = await getAdminLegalAcceptance(req.session.user.id, req.session.user.coachingId);
+  const acceptance = await cachedRequestContext(
+    req,
+    `legal:${req.session.user.id}:${req.session.user.coachingId}`,
+    () => getAdminLegalAcceptance(req.session.user.id, req.session.user.coachingId),
+    (row) => !row || hasAcceptedAdminLegal(row)
+  );
   if (!acceptance || hasAcceptedAdminLegal(acceptance)) {
     req.session.user.legalAcceptedAt = acceptance?.legal_accepted_at || acceptance?.terms_accepted_at || null;
     return next();
@@ -3872,12 +3902,17 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  const admin = await get(
-    `SELECT must_change_password
-     FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'admin'
-     LIMIT 1`,
-    [req.session.user.id, req.session.user.coachingId]
+  const admin = await cachedRequestContext(
+    req,
+    `password:${req.session.user.id}:${req.session.user.coachingId}`,
+    () => get(
+      `SELECT must_change_password
+       FROM users
+       WHERE id = ? AND coaching_id = ? AND role = 'admin'
+       LIMIT 1`,
+      [req.session.user.id, req.session.user.coachingId]
+    ),
+    (row) => !row?.must_change_password
   );
 
   if (!admin?.must_change_password) {
@@ -4988,12 +5023,17 @@ app.post('/admin/legal/accept', requireCoachingAdmin, async (req, res) => {
 });
 
 app.get('/admin/password/setup', requireCoachingAdmin, async (req, res) => {
-  const admin = await get(
-    `SELECT must_change_password
-     FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'admin'
-     LIMIT 1`,
-    [req.session.user.id, req.session.user.coachingId]
+  const admin = await cachedRequestContext(
+    req,
+    `password:${req.session.user.id}:${req.session.user.coachingId}`,
+    () => get(
+      `SELECT must_change_password
+       FROM users
+       WHERE id = ? AND coaching_id = ? AND role = 'admin'
+       LIMIT 1`,
+      [req.session.user.id, req.session.user.coachingId]
+    ),
+    (row) => !row?.must_change_password
   );
 
   if (!admin?.must_change_password) {

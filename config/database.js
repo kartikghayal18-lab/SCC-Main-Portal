@@ -50,8 +50,15 @@ function getPool() {
     pool = new PoolImpl({
       connectionString,
       max: isServerlessRuntime() ? 1 : 10,
-      idleTimeoutMillis: 30000,
+      // On a long-running server keep connections open between clicks: reopening one costs a
+      // TLS + auth handshake to the database region on the next request.
+      idleTimeoutMillis: isServerlessRuntime() ? 30000 : 10 * 60 * 1000,
       connectionTimeoutMillis: 15000,
+    });
+    // An idle connection closed by the database (e.g. Neon suspending compute) is dropped from the
+    // pool and replaced on the next query; without this listener the error would crash the process.
+    pool.on('error', (error) => {
+      console.error('[DB] idle connection error', error.message);
     });
   }
 
